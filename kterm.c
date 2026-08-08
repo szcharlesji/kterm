@@ -30,6 +30,7 @@
 #include <signal.h>
 #include <getopt.h>
 #include "keyboard.h"
+#include "statusbar.h"
 #ifdef KINDLE
 #include "kindle.h"
 #endif
@@ -528,28 +529,107 @@ static GtkWidget * build_popup(GtkWidget *terminal, GtkWidget *box) {
 }
 
 #ifdef KINDLE
-/** State of the touch gesture currently in progress */
+/**
+ * State of the touch gesture in progress.
+ *
+ * Button 1 is fully mediated: the press is never handed straight to vte,
+ * because at press time we cannot yet tell a tap from a drag from a hold.
+ * The gesture is classified as it develops and the appropriate events are
+ * synthesised afterwards.
+ */
 static struct {
-    guint longpress_source;  /** Pending long press timer, 0 if none */
-    gdouble origin_y;        /** Where the finger went down */
-    gdouble last_y;          /** Where it was on the previous motion event */
+    guint longpress_source;  /** Pending hold timer, 0 if none */
+    gdouble origin_x;        /** Where the finger went down */
+    gdouble origin_y;
+    gdouble last_y;          /** Position at the previous motion event */
     gdouble accum;           /** Sub-row scroll remainder */
-    gboolean propagated;     /** The press was handed to vte, so the release must be too */
-    GdkEventButton *press;   /** Copy of the press event, for synthesising a release */
-} touch = { 0, 0, 0, 0, FALSE, NULL };
+    gboolean moved;          /** Travelled past the slop threshold */
+    gboolean precise;        /** Hold engaged: raw events go through to the app */
+} touch;
+
+/** Pointer device, needed so gtk3 does not complain about synthetic events */
+#if GTK_CHECK_VERSION(3,0,0)
+static GdkDevice * getptrdevice(void) {
+# if GTK_CHECK_VERSION(3,20,0)
+    return gdk_seat_get_pointer(gdk_display_get_default_seat(gdk_display_get_default()));
+# else
+    return gdk_device_manager_get_client_pointer(
+        gdk_display_get_device_manager(gdk_display_get_default()));
+# endif
+}
+#endif
 
 /**
- * Forget the press event copy
+ * Deliver a synthetic button event to the terminal
+ * @param terminal Terminal widget
+ * @param type GDK_BUTTON_PRESS or GDK_BUTTON_RELEASE
+ * @param button Button number
+ * @param x Position within the widget
+ * @param y Position within the widget
  */
-static void touch_drop_press(void) {
-    if (touch.press) {
-        gdk_event_free((GdkEvent *) touch.press);
-        touch.press = NULL;
-    }
+static void send_button_event(GtkWidget *terminal, GdkEventType type,
+                              guint button, gdouble x, gdouble y) {
+    GdkWindow *window = gtk_widget_get_window(terminal);
+    GdkEvent *event;
+    if (!window) { return; }
+    event = gdk_event_new(type);
+    event->button.window = g_object_ref(window);
+    event->button.send_event = TRUE;
+    event->button.time = gtk_get_current_event_time();
+    event->button.x = x;
+    event->button.y = y;
+    event->button.x_root = x;
+    event->button.y_root = y;
+    event->button.state = 0;
+    event->button.button = button;
+    event->button.axes = NULL;
+#if GTK_CHECK_VERSION(3,0,0)
+    gdk_event_set_device(event, getptrdevice());
+#else
+    event->button.device = gdk_device_get_core_pointer();
+#endif
+    gtk_main_do_event(event);
+    gdk_event_free(event);
 }
 
 /**
- * Cancel a pending long press
+ * Deliver a synthetic scroll event to the terminal.
+ * Going through vte rather than moving the adjustment ourselves is what makes
+ * this work everywhere: vte reports a wheel button to the application when it
+ * has asked for mouse tracking, and scrolls its own buffer when it has not. So
+ * a drag scrolls the pager in a full screen TUI and the scrollback at a shell,
+ * with no need to guess which one we are looking at.
+ * @param terminal Terminal widget
+ * @param direction Scroll direction
+ * @param x Position within the widget
+ * @param y Position within the widget
+ */
+static void send_scroll_event(GtkWidget *terminal, GdkScrollDirection direction,
+                              gdouble x, gdouble y) {
+    GdkWindow *window = gtk_widget_get_window(terminal);
+    GdkEvent *event;
+    if (!window) { return; }
+    event = gdk_event_new(GDK_SCROLL);
+    event->scroll.window = g_object_ref(window);
+    event->scroll.send_event = TRUE;
+    event->scroll.time = gtk_get_current_event_time();
+    event->scroll.x = x;
+    event->scroll.y = y;
+    event->scroll.x_root = x;
+    event->scroll.y_root = y;
+    event->scroll.state = 0;
+    event->scroll.direction = direction;
+#if GTK_CHECK_VERSION(3,0,0)
+    gdk_event_set_device(event, getptrdevice());
+#else
+    event->scroll.device = gdk_device_get_core_pointer();
+#endif
+    gtk_main_do_event(event);
+    gdk_event_free(event);
+}
+
+/**
+ * Cancel a pending hold
  */
 static void longpress_cancel(void) {
     if (touch.longpress_source) {
@@ -559,59 +639,47 @@ static void longpress_cancel(void) {
 }
 
 /**
- * Long press timer callback. Opens the popup menu so the menu is reachable
- * with one finger; the two finger tap still works as it always did.
- * @param data Menu widget
+ * Hold timer. The finger has been still for long enough, so switch this
+ * gesture into a precise drag: from here on the real events reach the
+ * application, which is what makes selecting text and dragging a pane
+ * divider possible.
+ * @param data Terminal widget
  * @return Always false, the timer fires once
  */
 static gboolean longpress_cb(gpointer data) {
+    GtkWidget *terminal = data;
     touch.longpress_source = 0;
-    // The finger is still down. If vte saw the press it would sit in selection
-    // mode for as long as the menu is up, so hand it a release first.
-    if (touch.propagated && touch.press) {
-        gdk_test_simulate_button(touch.press->window,
-                                 (gint) touch.press->x, (gint) touch.press->y,
-                                 1, touch.press->state, GDK_BUTTON_RELEASE);
-        touch.propagated = FALSE;
-    }
-    touch_drop_press();
-    gtk_menu_popup(GTK_MENU(data), NULL, NULL, NULL, NULL, 0, gtk_get_current_event_time());
+    if (touch.moved) { return FALSE; }
+    touch.precise = TRUE;
+    // the finger is already down; tell the application the drag starts here
+    send_button_event(terminal, GDK_BUTTON_PRESS, 1, touch.origin_x, touch.origin_y);
     return FALSE;
 }
 
 /**
- * Scroll the scrollback buffer by a finger drag
+ * Turn vertical finger travel into whole-row scroll steps
  * @param terminal Terminal widget
  * @param y Current pointer position
  */
-static void touch_scroll_to(GtkWidget *terminal, gdouble y) {
-    GtkAdjustment *adj;
-    glong char_height;
-    gdouble value, lower, upper, page;
-    gint rows;
+static void touch_scroll_drag(GtkWidget *terminal, gdouble y) {
+    glong char_height = vte_terminal_get_char_height(VTE_TERMINAL(terminal));
+    GdkScrollDirection direction;
+    gint rows, steps, i;
 
-#if VTE_CHECK_VERSION(0,38,0)
-    adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(terminal));
-#else
-    adj = vte_terminal_get_adjustment(VTE_TERMINAL(terminal));
-#endif
-    char_height = vte_terminal_get_char_height(VTE_TERMINAL(terminal));
-    if (!adj || char_height <= 0) { return; }
-
+    if (char_height <= 0) { return; }
     touch.accum += y - touch.last_y;
     touch.last_y = y;
     rows = (gint) (touch.accum / (gdouble) char_height);
     if (rows == 0) { return; }
     touch.accum -= rows * (gdouble) char_height;
 
-    // content follows the finger: drag down to reveal earlier lines
-    lower = gtk_adjustment_get_lower(adj);
-    upper = gtk_adjustment_get_upper(adj);
-    page = gtk_adjustment_get_page_size(adj);
-    value = gtk_adjustment_get_value(adj) - rows;
-    if (value > upper - page) { value = upper - page; }
-    if (value < lower) { value = lower; }
-    gtk_adjustment_set_value(adj, value);
+    // content follows the finger: dragging down reveals earlier lines
+    direction = (rows > 0) ? GDK_SCROLL_UP : GDK_SCROLL_DOWN;
+    steps = ABS(rows);
+    if (steps > TOUCH_SCROLL_MAX_STEP) { steps = TOUCH_SCROLL_MAX_STEP; }
+    for (i = 0; i < steps; i++) {
+        send_scroll_event(terminal, direction, touch.origin_x, y);
+    }
 }
 #endif /* KINDLE */
 
@@ -628,34 +696,45 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
     D printf("event-button: %i\n", event->button);
 #ifdef KINDLE
     if (event->type == GDK_MOTION_NOTIFY) {
-        gdouble y = ((GdkEventMotion *) event)->y;
-        // a drag is not a long press
-        if (touch.longpress_source && ABS(y - touch.origin_y) > TOUCH_SCROLL_SLOP) {
-            longpress_cancel();
+        GdkEventMotion *motion = (GdkEventMotion *) event;
+        // precise drag: hand the motion over so the application can select
+        // text or drag a pane divider
+        if (touch.precise) { return FALSE; }
+        if (!touch.moved &&
+            (ABS(motion->x - touch.origin_x) > TOUCH_SCROLL_SLOP ||
+             ABS(motion->y - touch.origin_y) > TOUCH_SCROLL_SLOP)) {
+            touch.moved = TRUE;
+            longpress_cancel();  // a drag is not a hold
         }
-        if (conf->touch_scroll) { touch_scroll_to(terminal, y); }
-        // never propagate: vte would start a selection, which is unusable here
+        if (touch.moved && conf->touch_scroll) { touch_scroll_drag(terminal, motion->y); }
         return TRUE;
     }
     if (event->button == 1) {
         if (event->type == GDK_BUTTON_PRESS) {
             longpress_cancel();
-            touch_drop_press();
+            touch.origin_x = event->x;
             touch.origin_y = touch.last_y = event->y;
             touch.accum = 0;
-            touch.propagated = conf->mouse_on;
-            touch.press = (GdkEventButton *) gdk_event_copy((GdkEvent *) event);
-            touch.longpress_source = g_timeout_add(TOUCH_LONGPRESS_MS, longpress_cb, menu);
-            return !touch.propagated;
+            touch.moved = FALSE;
+            touch.precise = FALSE;
+            touch.longpress_source = g_timeout_add(TOUCH_LONGPRESS_MS, longpress_cb, terminal);
+            // swallow for now: a press alone does not tell us what this is yet
+            return TRUE;
         }
         if (event->type == GDK_BUTTON_RELEASE) {
-            // the release must always match what vte was told about the press,
-            // or vte is left sitting in selection mode with a phantom button down
-            gboolean propagate = touch.propagated;
+            gboolean was_precise = touch.precise;
+            gboolean was_tap = !touch.moved;
             longpress_cancel();
-            touch_drop_press();
-            touch.propagated = FALSE;
-            return !propagate;
+            touch.precise = FALSE;
+            touch.moved = FALSE;
+            // a precise drag opened with a real press, so it needs the real release
+            if (was_precise) { return FALSE; }
+            if (was_tap && conf->mouse_on) {
+                // now that it is settled as a tap, deliver it as a click
+                send_button_event(terminal, GDK_BUTTON_PRESS, 1, event->x, event->y);
+                send_button_event(terminal, GDK_BUTTON_RELEASE, 1, event->x, event->y);
+            }
+            return TRUE;
         }
     }
 #endif
@@ -1023,6 +1102,16 @@ gint main(gint argc, gchar **argv) {
     
     GtkWidget *menu = build_popup(terminal, vbox);
     D printf("startup: menu built\n");
+
+    // packed before the terminal so it sits at the top of the window
+    GtkWidget *statusbar = NULL;
+    if (conf->statusbar_on) {
+        statusbar = statusbar_new(menu);
+        gtk_box_pack_start(GTK_BOX(vbox), statusbar, FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(vbox), statusbar, 0);
+        statusbar_start(statusbar);
+        D printf("startup: status bar built\n");
+    }
     // signals
     g_signal_connect(window, "delete_event", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(terminal, "child-exited", G_CALLBACK(terminal_exit), NULL);
@@ -1041,6 +1130,7 @@ gint main(gint argc, gchar **argv) {
     if (!conf->kb_on) {
         gtk_widget_hide(keyboard_box);
     }
+    UNUSED(statusbar);
     g_signal_connect(keyboard_box, "size-allocate", G_CALLBACK(keyboard_update), keyboard);
     gtk_window_maximize(GTK_WINDOW(window));
     gtk_main();

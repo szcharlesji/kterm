@@ -28,6 +28,33 @@ AM_COND_IF(
 
 PKG_CHECK_MODULES([GTK], [$gtk_package])
 
+dnl GDK_X11_LIBS is referenced by Makefile.am but nothing ever set it. It used
+dnl to not matter, because the X libraries arrived indirectly through libgdk
+dnl or libvte. Binutils stopped resolving symbols through an intermediate DSO
+dnl (--no-copy-dt-needed-entries is the default now), so libgdk-x11's calls to
+dnl XGetGeometry and friends have to be satisfied explicitly. Not fatal: a
+dnl build whose toolkit brings its own X libraries can still succeed.
+PKG_CHECK_MODULES([GDK_X11], [x11 xext], [],
+  [AC_MSG_WARN([x11/xext not found via pkg-config, relying on indirect linkage])])
+
+dnl A statically linked libvte pulls in round() but pkg-config does not list
+dnl libm, so the link fails unless we ask for it explicitly. Checked here,
+dnl before the Kindle block, because the static-link probe below needs it.
+AC_SEARCH_LIBS([round], [m])
+
+dnl glib merged gthread into libglib in 2.32 and gtk+-2.0.pc stopped listing
+dnl it. Kindle firmware still runs glib 2.29, where gthread is a separate
+dnl library that g_type_init() calls into during gtk_init(). Building against
+dnl a modern .pc therefore produces a binary that segfaults inside
+dnl gtk_init -> gdk_pre_parse_libgtk_only -> g_type_init -> g_thread_init_glib,
+dnl because the thread vtable was never populated. Link it when it exists;
+dnl on glib >= 2.32 this is a harmless no-op stub.
+AC_CHECK_LIB([gthread-2.0], [g_thread_init],
+  [GTHREAD_LIBS="-lgthread-2.0"],
+  [AC_MSG_WARN([libgthread not found, assuming glib >= 2.32])],
+  [$GTK_LIBS])
+AC_SUBST([GTHREAD_LIBS])
+
 AM_COND_IF(
   [KINDLE],
   [dnl If Kindle
@@ -41,6 +68,23 @@ AM_COND_IF(
   dnl Libtermcap is needed for static builds with vte < 2.91
   require_termcap=yes
   AC_DEFINE([KINDLE], [1])
+
+  dnl Modern binutils turns on RELRO by default. A non-PIE executable that
+  dnl references libglib's exported variables needs copy relocations for them,
+  dnl and the linker then parks g_threads_got_initialized in .data.rel.ro,
+  dnl which the loader makes read-only before libgthread has run. glib 2.29,
+  dnl which is what Kindle firmware ships, still keeps threads in a separate
+  dnl library, so gtk_init() -> g_type_init() -> g_thread_init_glib() writes
+  dnl that flag and the process dies on a read-only page. Kindle's own
+  dnl binaries carry no RELRO segment; match them.
+  AC_MSG_CHECKING([whether the linker accepts -z norelro])
+  saved_LDFLAGS=$LDFLAGS
+  LDFLAGS="$LDFLAGS -Wl,-z,norelro"
+  AC_LINK_IFELSE(
+    [AC_LANG_PROGRAM([], [])],
+    [AC_MSG_RESULT([yes])],
+    [AC_MSG_RESULT([no])
+     LDFLAGS=$saved_LDFLAGS])
 
   saved_PKG_CONFIG=$PKG_CONFIG
   PKG_CONFIG="$PKG_CONFIG --static"
@@ -69,7 +113,9 @@ AM_COND_IF(
   saved_CFLAGS=$CFLAGS
   saved_LIBS=$LIBS
   CFLAGS="$GTK_CFLAGS $VTE_CFLAGS"
-  LIBS="$GTK_LIBS $VTE_STATIC_LIBS"
+  dnl Probe with everything the real link line gets, or this reports failure
+  dnl for an unrelated reason and silently falls back to a dynamic libvte.
+  LIBS="$GTK_LIBS $VTE_STATIC_LIBS $GDK_X11_LIBS $LIBS"
   AC_LINK_IFELSE(
     [AC_LANG_PROGRAM([[#include <vte/vte.h>]], [[vte_terminal_new();]])],
     [AC_MSG_RESULT([yes])

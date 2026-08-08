@@ -25,7 +25,7 @@ fonts_DATA = fonts/fonts.conf fonts/README.md
 kterm_CFLAGS = @GTK_CFLAGS@ @VTE_CFLAGS@ @GDK_X11_CFLAGS@ @DBUS_CFLAGS@ -DSYSCONFDIR=\"$(sysconfdir)\"
 kterm_LDADD = @GTK_LIBS@ @VTE_LIBS@ @GDK_X11_LIBS@ @GTHREAD_LIBS@ @DBUS_LIBS@
 
-EXTRA_DIST = ktsh.h statusbar.h fonts/fonts.conf fonts/README.md tests/ktsh_test.c
+EXTRA_DIST = ktsh.h statusbar.h tests/xtouch.c tests/touchtest.sh fonts/fonts.conf fonts/README.md tests/ktsh_test.c
 
 AM_CPPFLAGS = -pedantic -Wall -Wextra
 

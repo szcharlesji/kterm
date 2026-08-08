@@ -2,6 +2,15 @@
 
 A terminal emulator with an on-screen keyboard for jailbroken Kindles.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="kterm running a multiplexer over ssh on a Paperwhite 5" width="400">
+</p>
+
+<p align="center"><sub>
+  Paperwhite 5, ssh into a remote host with panes and touch.
+  <a href="docs/demo.mp4">Full quality</a>.
+</sub></p>
+
 Fork of [bfabiszewski/kterm](https://github.com/bfabiszewski/kterm), brought up
 to date for current firmware and modern terminal programs.
 

@@ -5,7 +5,34 @@ This is a simple GTK+ terminal emulator with embedded virtual keyboard. It is ba
 
 Kterm has been developed for Kindle Touch. It is reported to also work on Paperwhites. Generally it should work on any platform which supports GTK+, either version 2 or 3.
 
-On Kindle menu pops up on two fingers tap in the terminal window. On other devices on right button mouse click.
+On Kindle the menu pops up on a two finger tap, or on a long press with one finger. On other devices on right button mouse click. A one finger drag scrolls the scrollback buffer.
+
+#### The escape sequence shim (`ktsh`)
+
+Kindle firmware ships GTK+ 2.20, which pins kterm to VTE 0.28 — a terminal
+emulator from 2011. VTE of that vintage *prints* any escape sequence it does
+not recognise as literal text, so a modern shell or TUI leaves debris all over
+the screen, and it cannot answer the queries those programs use to discover
+what the terminal looks like.
+
+`ktsh` is a small POSIX program that kterm runs the child shell under. It gives
+the shell its own pty and filters both directions:
+
+  * removes shell integration sequences (`OSC 7` cwd, `OSC 133` prompt marks,
+    `OSC 633`), hyperlink wrappers, kitty graphics, Sixel, `XTGETTCAP` — the
+    escape boxes that appear after every fish or zsh prompt;
+  * answers `OSC 10/11/12` colour queries with the colours kterm actually
+    painted, so applications stop assuming a dark background;
+  * folds 24-bit colour onto a palette VTE can render;
+  * rewrites VTE's legacy X10 mouse reports into the SGR form (`DECSET 1006`)
+    that applications now ask for, which is what makes touch work in nvim and
+    friends instead of spraying `␛[M` at the screen.
+
+Because it filters the byte stream rather than the local shell, it fixes remote
+sessions too — `ssh` into a machine running fish and the prompt is clean.
+
+Set `shim = 0` in `kterm.conf`, pass `-S 0`, or set `KTSH_DISABLE=1` to bypass
+it. `ktsh -h` lists its own options; `ktsh -d <file>` logs both byte streams.
 
 #### Keyboard [XML config](layouts/keyboard.xml) **\<nodes\>** and **attributes**:
   * **\<layout\>** - layout
@@ -39,12 +66,22 @@ Usage: kterm [OPTIONS]
         -h            show this message
         -k <0|1>      keyboard off/on
         -l <path>     keyboard layout config path
+        -m <0|1>      mouse reporting off/on
         -o <U|R|L>    screen orientation (up, right, left)
         -s <size>     font size
+        -S <0|1>      escape sequence shim (ktsh) off/on
         -t <encoding> terminal encoding
         -u <B|I|U>    cursor shape (block, I-beam, underline)
         -v            print version and exit
 ```
+
+#### Fonts
+
+Nerd Font glyphs work, with one caveat: pango 1.26 on the device predates
+HarfBuzz shaping, so programming ligatures are not composed. See
+[fonts/README.md](fonts/README.md) for installing a font — the Kindle rootfs is
+read only, so kterm ships its own `fonts.conf` and the launcher points
+`FONTCONFIG_FILE` at it.
 
 For a list of what constitutes valid encodings, check [this list][iana-character-sets] or the list returned by `iconv -l`.
 

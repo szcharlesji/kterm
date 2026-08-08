@@ -381,6 +381,8 @@ static void kt_handle_csi(KtFilter *f, KtBuf *out) {
     if (final == 'p' && inter == '$') { return; }                                 /* DECRQM/DECRQSS */
     if (final == 'c' && priv == '=') { return; }                                  /* DA3            */
     if (final == 'S' && priv == '?') { return; }                                  /* XTSMGRAPHICS   */
+    if (final == 'm' && priv != 0) { return; }   /* XTMODKEYS: fish emits CSI > 4 ; 1 m at its prompt */
+    if (final == 'n' && priv == '>') { return; }                                  /* XTDISABLEMODKEYS */
     if ((final == '}' || final == '~') && inter == '\'') { return; }              /* DECIC/DECDC    */
     if (final == 't') {
         int op = kt_atoi(params);

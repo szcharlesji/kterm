@@ -208,9 +208,22 @@ static void test_modern_csi(void) {
     down(&f, "\033[22;0t" "y" "\033[23;0t", &out, &reply);
     expect("title stack push/pop removed", &out, "y");
 
+    /* fish 4.x emits this at every prompt; vte 0.28 typed it onto the screen */
+    ktbuf_clear(&out);
+    down(&f, "\033[>4;1m~@trashcan > ", &out, &reply);
+    expect("XTMODKEYS removed, prompt intact", &out, "~@trashcan > ");
+
+    ktbuf_clear(&out);
+    down(&f, "\033[>4;0m\033[>n", &out, &reply);
+    expect("XTMODKEYS reset and query removed", &out, "");
+
     ktbuf_clear(&out);
     down(&f, "\033[2J\033[H\033[1;5H", &out, &reply);
     expect("ordinary CSI untouched", &out, "\033[2J\033[H\033[1;5H");
+
+    ktbuf_clear(&out);
+    down(&f, "\033[0;1;31mstill colours\033[m", &out, &reply);
+    expect("plain SGR still passes", &out, "\033[0;1;31mstill colours\033[m");
 
     ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
 }

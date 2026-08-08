@@ -79,6 +79,17 @@
 /** Delay for key release event */
 #define KB_RELEASE_DELAY_MS 100
 
+/** Name of the shell shim binary, looked for next to the kterm binary */
+#define SHIM_FILE "ktsh"
+/** Number of palette entries handed to VTE */
+#define KT_PALETTE_SIZE 16
+/** Where kterm records the active scheme so the shim can answer color queries */
+#define SCHEME_FILE ".kterm-scheme"
+/** Hold this long with one finger to open the popup menu */
+#define TOUCH_LONGPRESS_MS 600
+/** Ignore drags shorter than this many pixels before scrolling */
+#define TOUCH_SCROLL_SLOP 12
+
 /** Terminal scrollback size */
 #define VTE_SCROLLBACK_LINES 200
 /** Default terminal font family */
@@ -110,8 +121,15 @@ typedef struct {
     gchar kb_conf_path[PATH_MAX];  /** Keyboard config path */
     gchar orientation;  /** Screen orientation: 'U', 'R' or 'L' */
     gchar orientation_saved;  /** Initial screen orientation: 'U', 'R' or 'L' */
+    gboolean shim_on;  /** Route the child process through the ktsh shim */
+    gboolean mouse_on;  /** Report taps to the application as mouse events */
+    gboolean touch_scroll;  /** One finger drag scrolls the scrollback buffer */
+    gchar shim_color[8];  /** How ktsh folds 24-bit color: 256, gray or keep */
+    gchar conf_path[PATH_MAX];  /** Config file this was read from, for saving */
 } KTconf;
 
 KTconf * parse_config(void);
+void save_config(const KTconf *conf);
+gboolean kterm_exe_dir(gchar *buf, gsize len);
 
 #endif

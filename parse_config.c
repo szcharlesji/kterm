@@ -26,33 +26,45 @@
 #include "config.h"
 
 /**
+ * Directory holding the running kterm binary
+ * @param buf Buffer receiving the path
+ * @param len Buffer size
+ * @return True on success, false if the path could not be determined
+ */
+gboolean kterm_exe_dir(gchar *buf, gsize len) {
+    gchar self[PATH_MAX], *s;
+    gssize n;
+    if ((n = readlink("/proc/self/exe", self, sizeof(self) - 1)) == -1) { return FALSE; }
+    self[n] = '\0';
+    if ((s = strrchr(self, '/')) == NULL) { return FALSE; }
+    *s = '\0';
+    snprintf(buf, len, "%s", self);
+    return TRUE;
+}
+
+/**
  * Parse kterm config
  * @return KTconf structure or NULL
  */
 KTconf *parse_config(void) {
-    
+
     D printf("Parsing config file\n");
-    
+
     gchar conf_path[PATH_MAX];
     conf_path[0] = '\0';
-    
+
     // if kterm config is not found
     if (access(CONFIG_FULL_PATH, R_OK) == 0) {
         snprintf(conf_path, sizeof(conf_path), "%s", CONFIG_FULL_PATH);
     } else {
         // set path to kterm binary's path
-        gchar self[PATH_MAX], *s;
-        gssize len;
-        if ((len = readlink("/proc/self/exe", self, sizeof(self) - 1)) != -1) {
-            self[len] = '\0';
-            if ((s = strrchr(self, '/')) != NULL) {
-                *s = '\0';
-                snprintf(conf_path, sizeof(conf_path), "%s/%s", self, CONFIG_FILE);
-            }
+        gchar self[PATH_MAX];
+        if (kterm_exe_dir(self, sizeof(self))) {
+            snprintf(conf_path, sizeof(conf_path), "%s/%s", self, CONFIG_FILE);
         }
     }
     D printf("config: %s\n", conf_path);
-    
+
     KTconf *conf = NULL;
     if ((conf = g_malloc0(sizeof(KTconf))) == NULL) {
         D printf("Memory allocation failed\n");
@@ -67,7 +79,12 @@ KTconf *parse_config(void) {
     snprintf(conf->encoding, sizeof(conf->encoding), "%s", VTE_ENCODING);
     snprintf(conf->kb_conf_path, sizeof(conf->kb_conf_path), "%s", KB_FULL_PATH);
     conf->orientation = 0;
-    
+    conf->shim_on = TRUE;
+    conf->mouse_on = TRUE;
+    conf->touch_scroll = TRUE;
+    snprintf(conf->shim_color, sizeof(conf->shim_color), "256");
+    snprintf(conf->conf_path, sizeof(conf->conf_path), "%s", conf_path);
+
     FILE *fp;
     if ((fp = fopen(conf_path, "r")) == NULL) {
         D printf("No config file\n");
@@ -135,9 +152,114 @@ KTconf *parse_config(void) {
                 D printf("cursor_shape = %c\n", conf->cursor_shape);
             }
         }
+        else if (!strncmp(buf, "shim", 4)) {
+            gint shim_on = -1;
+            sscanf(buf, "shim = %i", &shim_on);
+            if (shim_on == 0 || shim_on == 1) {
+                conf->shim_on = shim_on;
+                D printf("shim = %i\n", conf->shim_on);
+            }
+        }
+        else if (!strncmp(buf, "mouse_report", 12)) {
+            gint mouse_on = -1;
+            sscanf(buf, "mouse_report = %i", &mouse_on);
+            if (mouse_on == 0 || mouse_on == 1) {
+                conf->mouse_on = mouse_on;
+                D printf("mouse_report = %i\n", conf->mouse_on);
+            }
+        }
+        else if (!strncmp(buf, "touch_scroll", 12)) {
+            gint touch_scroll = -1;
+            sscanf(buf, "touch_scroll = %i", &touch_scroll);
+            if (touch_scroll == 0 || touch_scroll == 1) {
+                conf->touch_scroll = touch_scroll;
+                D printf("touch_scroll = %i\n", conf->touch_scroll);
+            }
+        }
+        else if (!strncmp(buf, "color_folding", 13)) {
+            gchar str[256] = { 0 };
+            sscanf(buf, "color_folding = \"%[^\"\n\r]\"", str);
+            if (!strcmp(str, "256") || !strcmp(str, "gray") || !strcmp(str, "keep")) {
+                snprintf(conf->shim_color, sizeof(conf->shim_color), "%s", str);
+                D printf("color_folding = %s\n", conf->shim_color);
+            }
+        }
     }
     
     fclose(fp);
-    
+
     return conf;
-} 
+}
+
+/** Settings that survive a restart, in the order they are appended */
+#define SAVED_KEYS 6
+
+/**
+ * Write the settings that can be changed at runtime back to the config file.
+ * Existing lines are rewritten in place so user comments and unknown keys
+ * are preserved; anything missing is appended.
+ * @param conf Kterm config
+ */
+void save_config(const KTconf *conf) {
+    static const gchar *keys[SAVED_KEYS] = {
+        "keyboard", "color_scheme", "font_family", "font_size",
+        "mouse_report", "touch_scroll"
+    };
+    gchar values[SAVED_KEYS][PATH_MAX];
+    gboolean seen[SAVED_KEYS] = { FALSE };
+    gchar tmp_path[PATH_MAX];
+    gchar buf[PATH_MAX];
+    FILE *in, *out;
+    gint i;
+
+    if (conf->conf_path[0] == '\0') {
+        D printf("No config file path, not saving\n");
+        return;
+    }
+
+    snprintf(values[0], sizeof(values[0]), "keyboard = %i", conf->kb_on ? 1 : 0);
+    snprintf(values[1], sizeof(values[1]), "color_scheme = %i", conf->color_reversed ? 1 : 0);
+    snprintf(values[2], sizeof(values[2]), "font_family = \"%s\"", conf->font_family);
+    snprintf(values[3], sizeof(values[3]), "font_size = %u", conf->font_size);
+    snprintf(values[4], sizeof(values[4]), "mouse_report = %i", conf->mouse_on ? 1 : 0);
+    snprintf(values[5], sizeof(values[5]), "touch_scroll = %i", conf->touch_scroll ? 1 : 0);
+
+    if (strlen(conf->conf_path) + sizeof(".tmp") > sizeof(tmp_path)) { return; }
+    strcpy(tmp_path, conf->conf_path);
+    strcat(tmp_path, ".tmp");
+    if ((out = fopen(tmp_path, "w")) == NULL) {
+        D printf("Cannot write %s\n", tmp_path);
+        return;
+    }
+
+    if ((in = fopen(conf->conf_path, "r")) != NULL) {
+        while (fgets(buf, sizeof(buf), in)) {
+            gboolean replaced = FALSE;
+            if (buf[0] != '#' && buf[0] != '\n') {
+                for (i = 0; i < SAVED_KEYS; i++) {
+                    gsize len = strlen(keys[i]);
+                    if (!strncmp(buf, keys[i], len) && (buf[len] == ' ' || buf[len] == '=')) {
+                        fprintf(out, "%s\n", values[i]);
+                        seen[i] = TRUE;
+                        replaced = TRUE;
+                        break;
+                    }
+                }
+            }
+            if (!replaced) { fputs(buf, out); }
+        }
+        fclose(in);
+    }
+
+    for (i = 0; i < SAVED_KEYS; i++) {
+        if (!seen[i]) { fprintf(out, "%s\n", values[i]); }
+    }
+    fclose(out);
+
+    if (rename(tmp_path, conf->conf_path) != 0) {
+        D printf("Cannot replace %s\n", conf->conf_path);
+        unlink(tmp_path);
+        return;
+    }
+    D printf("Saved config to %s\n", conf->conf_path);
+}

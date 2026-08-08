@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <signal.h>
 #include <getopt.h>
 #include "keyboard.h"
@@ -149,25 +150,24 @@ static void set_terminal_font(VteTerminal *terminal, const gchar *font_family, c
  */
 static void resize_font(VteTerminal *terminal, const guint mod) {
     const PangoFontDescription *pango_desc = vte_terminal_get_font(VTE_TERMINAL(terminal));
-    gchar *pango_name = pango_font_description_to_string(pango_desc);
-    if G_UNLIKELY(!pango_name) {
-        return;
+    gint font_size = 0;
+    if (pango_desc) {
+        // ask pango for the size rather than splitting the description string:
+        // family names ending in a digit ("JetBrainsMono Nerd Font Mono 3270")
+        // make the last-space heuristic pick up the wrong token
+        font_size = pango_font_description_get_size(pango_desc) / PANGO_SCALE;
     }
-    gchar *size_offset = strrchr(pango_name, ' ');
-    if (size_offset) {
-        *size_offset = '\0';
-        gint font_size = atoi(++size_offset);
-        D printf("font_family: %s\n", pango_name);
-        D printf("font_size: %i\n", font_size);
-        if (mod == FONT_UP) {
-            font_size++;
-        }
-        else if (font_size > 1) {
-            font_size--;
-        }
-        set_terminal_font(terminal, pango_name, font_size);
+    if (font_size <= 0) { font_size = (gint) conf->font_size; }
+    if (mod == FONT_UP) {
+        font_size++;
     }
-    g_free(pango_name);
+    else if (font_size > 1) {
+        font_size--;
+    }
+    D printf("font_family: %s\n", conf->font_family);
+    D printf("font_size: %i\n", font_size);
+    conf->font_size = (guint) font_size;
+    set_terminal_font(terminal, conf->font_family, font_size);
 }
 
 /**
@@ -190,73 +190,109 @@ static void fontdown(GtkWidget *widget, gpointer terminal) {
     resize_font(terminal, FONT_DOWN);
 }
 /**
+ * Path of a file living next to the kterm binary
+ * @param name File name
+ * @param buf Buffer receiving the path
+ * @param len Buffer size
+ * @return True on success
+ */
+static gboolean sibling_path(const gchar *name, gchar *buf, gsize len) {
+    gchar dir[PATH_MAX];
+    gsize dlen, nlen;
+    if (!kterm_exe_dir(dir, sizeof(dir))) { return FALSE; }
+    dlen = strlen(dir);
+    nlen = strlen(name);
+    if (dlen + nlen + 2 > len) { return FALSE; }
+    memcpy(buf, dir, dlen);
+    buf[dlen] = '/';
+    memcpy(buf + dlen + 1, name, nlen + 1);
+    return TRUE;
+}
+
+/**
+ * Is this an executable regular file?
+ * Deliberately stat() rather than access(X_OK): on Kindle the extension lives
+ * on a FUSE volume (fuse.fsp) mounted without default_permissions, where the
+ * access() permission check does not reflect the mode bits and reports
+ * perfectly runnable binaries as not executable.
+ * @param path File path
+ * @return True if it looks runnable
+ */
+static gboolean is_executable(const gchar *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) { return FALSE; }
+    if (!S_ISREG(st.st_mode)) { return FALSE; }
+    return (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+}
+
+/**
+ * Record the active color scheme where the shim can find it.
+ * VTE 0.28 cannot answer an OSC 11 background color query itself, so ktsh
+ * answers on its behalf and needs to know what kterm actually painted.
+ * @param scheme VTE_SCHEME_LIGHT or VTE_SCHEME_DARK
+ */
+static void write_scheme_file(gboolean scheme) {
+    gchar path[PATH_MAX];
+    FILE *fp;
+    if (!sibling_path(SCHEME_FILE, path, sizeof(path))) { return; }
+    if ((fp = fopen(path, "w")) == NULL) {
+        D printf("cannot write scheme file %s\n", path);
+        return;
+    }
+    fprintf(fp, "%s\n", (scheme == VTE_SCHEME_DARK) ? "dark" : "light");
+    fclose(fp);
+}
+
+/**
  * Setup terminal color scheme
  * @param terminal Terminal
  * @param scheme VTE_SCHEME_LIGHT or VTE_SCHEME_DARK
  */
 static void set_terminal_colors(GtkWidget *terminal, gboolean scheme) {
+    /*
+     * Sixteen gray levels rather than eight. VTE synthesises whatever it is
+     * not given, and from an eight entry base the bright half collapses onto
+     * the normal half, so bold colored text became indistinguishable. The
+     * ramps below are chosen for contrast against their own background: on
+     * the light scheme even "white" (slot 7) is dark enough to read on paper,
+     * and "bright white" (slot 15) is the emphasis color, i.e. black.
+     */
+    static const guint8 ramp_light[KT_PALETTE_SIZE] = {
+        0x00, 0x40, 0x60, 0x88, 0x28, 0x58, 0x70, 0x30,
+        0x78, 0x58, 0x78, 0xa0, 0x40, 0x70, 0x88, 0x00
+    };
+    static const guint8 ramp_dark[KT_PALETTE_SIZE] = {
+        0x00, 0xa0, 0x88, 0xc0, 0x70, 0x98, 0xb0, 0xd0,
+        0x68, 0xc0, 0xa8, 0xe0, 0x90, 0xb8, 0xd0, 0xff
+    };
+    const guint8 *ramp = (scheme == VTE_SCHEME_DARK) ? ramp_dark : ramp_light;
+    guint8 bg = (scheme == VTE_SCHEME_DARK) ? 0x00 : 0xff;
+    guint8 fg = (scheme == VTE_SCHEME_DARK) ? 0xff : 0x00;
+    gint n;
 #if GTK_CHECK_VERSION(3,14,0)
-    // light background
-    GdkRGBA palette_light[8] = {{ 0, 0, 0, 1 }, // black
-        { 0x5050/0xffff, 0x5050/0xffff, 0x5050/0xffff, 1 }, // red
-        { 0x7070/0xffff, 0x7070/0xffff, 0x7070/0xffff, 1 }, // green
-        { 0xa0a0/0xffff, 0xa0a0/0xffff, 0xa0a0/0xffff, 1 }, // yellow
-        { 0x8080/0xffff, 0x8080/0xffff, 0x8080/0xffff, 1 }, // blue
-        { 0x3030/0xffff, 0x3030/0xffff, 0x3030/0xffff, 1 }, // magenta
-        { 0x9090/0xffff, 0x9090/0xffff, 0x9090/0xffff, 1 }, // cyan
-        { 1, 1, 1, 1 }}; // white
-    // dark background
-    GdkRGBA palette_dark[8] = {{ 0, 0, 0, 1 },
-        { 0x8888/0xffff, 0x8888/0xffff, 0x8888/0xffff, 1 },
-        { 0x9898/0xffff, 0x9898/0xffff, 0x9898/0xffff, 1 },
-        { 0xd0d0/0xffff, 0xd0d0/0xffff, 0xd0d0/0xffff, 1 },
-        { 0xa8a8/0xffff, 0xa8a8/0xffff, 0xa8a8/0xffff, 1 },
-        { 0x7070/0xffff, 0x7070/0xffff, 0x7070/0xffff, 1 },
-        { 0xb8b8/0xffff, 0xb8b8/0xffff, 0xb8b8/0xffff, 1 },
-        { 1, 1, 1, 1 }};
-    GdkRGBA *palette;
-    GdkRGBA color_white = { 1, 1, 1, 1 };
-    GdkRGBA color_black = { 0, 0, 0, 1 };
+    GdkRGBA palette[KT_PALETTE_SIZE];
     GdkRGBA color_bg, color_fg;
+# define KT_SET_COLOR(c, v) do { \
+        (c).red = (c).green = (c).blue = (gdouble) (v) / 255.0; (c).alpha = 1; \
+    } while (0)
 #else
-    // light background
-    GdkColor palette_light[8] = {{ 0, 0x0000, 0x0000, 0x0000 },
-        { 0, 0x5050, 0x5050, 0x5050 },
-        { 0, 0x7070, 0x7070, 0x7070 },
-        { 0, 0xa0a0, 0xa0a0, 0xa0a0 },
-        { 0, 0x8080, 0x8080, 0x8080 },
-        { 0, 0x3030, 0x3030, 0x3030 },
-        { 0, 0x9090, 0x9090, 0x9090 },
-        { 0, 0xffff, 0xffff, 0xffff }};
-    // dark background
-    GdkColor palette_dark[8] = {{ 0, 0x0000, 0x0000, 0x0000 },
-        { 0, 0x8888, 0x8888, 0x8888 },
-        { 0, 0x9898, 0x9898, 0x9898 },
-        { 0, 0xd0d0, 0xd0d0, 0xd0d0 },
-        { 0, 0xa8a8, 0xa8a8, 0xa8a8 },
-        { 0, 0x7070, 0x7070, 0x7070 },
-        { 0, 0xb8b8, 0xb8b8, 0xb8b8 },
-        { 0, 0xffff, 0xffff, 0xffff }};
-    GdkColor *palette;
-    GdkColor color_white = { 0, 0xffff, 0xffff, 0xffff };
-    GdkColor color_black = { 0, 0x0000, 0x0000, 0x0000 };
-    GdkColor color_dim = { 0, 0x8888, 0x8888, 0x8888 };
+    GdkColor palette[KT_PALETTE_SIZE];
     GdkColor color_bg, color_fg;
+    GdkColor color_dim;
+# define KT_SET_COLOR(c, v) do { \
+        (c).pixel = 0; (c).red = (c).green = (c).blue = (guint16) ((v) * 0x101); \
+    } while (0)
 #endif
-    switch (scheme) {
-        default:
-        case VTE_SCHEME_LIGHT:
-            palette = palette_light;
-            color_bg = color_white;
-            color_fg = color_black;
-            break;
-        case VTE_SCHEME_DARK:
-            palette = palette_dark;
-            color_bg = color_black;
-            color_fg = color_white;
-            break;
+    for (n = 0; n < KT_PALETTE_SIZE; n++) {
+        KT_SET_COLOR(palette[n], ramp[n]);
     }
-    vte_terminal_set_colors(VTE_TERMINAL(terminal), NULL, NULL, palette, 8);
+    KT_SET_COLOR(color_bg, bg);
+    KT_SET_COLOR(color_fg, fg);
+#if !GTK_CHECK_VERSION(3,14,0)
+    KT_SET_COLOR(color_dim, (scheme == VTE_SCHEME_DARK) ? 0x88 : 0x78);
+#endif
+#undef KT_SET_COLOR
+    vte_terminal_set_colors(VTE_TERMINAL(terminal), NULL, NULL, palette, KT_PALETTE_SIZE);
     vte_terminal_set_color_background(VTE_TERMINAL(terminal), &color_bg);
     vte_terminal_set_color_foreground(VTE_TERMINAL(terminal), &color_fg);
 #if !GTK_CHECK_VERSION(3,14,0)
@@ -266,6 +302,7 @@ static void set_terminal_colors(GtkWidget *terminal, gboolean scheme) {
     vte_terminal_set_color_cursor(VTE_TERMINAL(terminal), NULL);
     vte_terminal_set_color_highlight(VTE_TERMINAL(terminal), NULL);
     conf->color_reversed = scheme;
+    write_scheme_file(scheme);
 }
 
 /**
@@ -386,6 +423,53 @@ static void menu_deactivate_cb(GtkWidget *widget, gpointer data) {
 #endif
 
 /**
+ * Paste menu callback
+ * @param widget Calling widget
+ * @param terminal Terminal
+ */
+static void paste_clipboard(GtkWidget *widget, gpointer terminal) {
+    UNUSED(widget);
+    vte_terminal_paste_clipboard(VTE_TERMINAL(terminal));
+}
+
+/**
+ * Force a full redraw menu callback.
+ * Partial updates leave ghosting on an eink panel; repainting everything
+ * gives the display driver a reason to do a full refresh.
+ * @param widget Calling widget
+ * @param terminal Terminal
+ */
+static void refresh_screen(GtkWidget *widget, gpointer terminal) {
+    UNUSED(widget);
+    gtk_widget_queue_draw(gtk_widget_get_toplevel(GTK_WIDGET(terminal)));
+}
+
+/**
+ * Mouse reporting toggle menu callback.
+ * With reporting off, taps never reach the application, which is the quick
+ * way out if an application leaves mouse tracking on and every tap starts
+ * spraying escape sequences at the shell.
+ * @param widget Calling widget
+ * @param data Unused
+ */
+static void toggle_mouse(GtkWidget *widget, gpointer data) {
+    UNUSED(data);
+    conf->mouse_on = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(widget));
+    D printf("mouse_report = %i\n", conf->mouse_on);
+}
+
+/**
+ * Save settings menu callback
+ * @param widget Calling widget
+ * @param data Unused
+ */
+static void save_settings(GtkWidget *widget, gpointer data) {
+    UNUSED(widget);
+    UNUSED(data);
+    save_config(conf);
+}
+
+/**
  * Build popup menu
  * @param terminal Terminal widget
  * @param box Kterm container
@@ -398,36 +482,138 @@ static GtkWidget * build_popup(GtkWidget *terminal, GtkWidget *box) {
     GtkWidget *fontdown_item = gtk_menu_item_new_with_label("Font decrease");
     GtkWidget *color_item = gtk_menu_item_new_with_label("Reverse colors");
     GtkWidget *kb_item = gtk_menu_item_new_with_label("Toggle keyboard");
+    GtkWidget *paste_item = gtk_menu_item_new_with_label("Paste");
+    GtkWidget *mouse_item = gtk_check_menu_item_new_with_label("Mouse reporting");
+    GtkWidget *refresh_item = gtk_menu_item_new_with_label("Refresh screen");
     GtkWidget *reset_item = gtk_menu_item_new_with_label("Reset terminal");
+    GtkWidget *save_item = gtk_menu_item_new_with_label("Save settings");
 #ifdef KINDLE
     GtkWidget *rotate_item = gtk_menu_item_new_with_label("Screen rotate");
 #endif
     GtkWidget *quit_item = gtk_menu_item_new_with_label("Quit");
-    
+
+    gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(mouse_item), conf->mouse_on);
+
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), fontup_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), fontdown_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), color_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), kb_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), paste_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), mouse_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), refresh_item);
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), reset_item);
+    gtk_menu_shell_append(GTK_MENU_SHELL(menu), save_item);
 #ifdef KINDLE
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), rotate_item);
 #endif
     gtk_menu_shell_append(GTK_MENU_SHELL(menu), quit_item);
-    
-    
+
+
     g_signal_connect(G_OBJECT(fontup_item), "activate", G_CALLBACK(fontup), (gpointer) terminal);
     g_signal_connect(G_OBJECT(fontdown_item), "activate", G_CALLBACK(fontdown), (gpointer) terminal);
     g_signal_connect(G_OBJECT(color_item), "activate", G_CALLBACK(reverse_colors), (gpointer) terminal);
     g_signal_connect(G_OBJECT(kb_item), "activate", G_CALLBACK(toggle_keyboard), box);
+    g_signal_connect(G_OBJECT(paste_item), "activate", G_CALLBACK(paste_clipboard), (gpointer) terminal);
+    g_signal_connect(G_OBJECT(mouse_item), "toggled", G_CALLBACK(toggle_mouse), NULL);
+    g_signal_connect(G_OBJECT(refresh_item), "activate", G_CALLBACK(refresh_screen), (gpointer) terminal);
     g_signal_connect(G_OBJECT(reset_item), "activate", G_CALLBACK(reset_terminal), (gpointer) terminal);
+    g_signal_connect(G_OBJECT(save_item), "activate", G_CALLBACK(save_settings), NULL);
 #ifdef KINDLE
     g_signal_connect(G_OBJECT(rotate_item), "activate", G_CALLBACK(screen_rotate), box);
 #endif
     g_signal_connect(G_OBJECT(quit_item), "activate", G_CALLBACK(gtk_main_quit), NULL);
-    
+
     gtk_widget_show_all(menu);
     return menu;
 }
+
+#ifdef KINDLE
+/** State of the touch gesture currently in progress */
+static struct {
+    guint longpress_source;  /** Pending long press timer, 0 if none */
+    gdouble origin_y;        /** Where the finger went down */
+    gdouble last_y;          /** Where it was on the previous motion event */
+    gdouble accum;           /** Sub-row scroll remainder */
+    gboolean propagated;     /** The press was handed to vte, so the release must be too */
+    GdkEventButton *press;   /** Copy of the press event, for synthesising a release */
+} touch = { 0, 0, 0, 0, FALSE, NULL };
+
+/**
+ * Forget the press event copy
+ */
+static void touch_drop_press(void) {
+    if (touch.press) {
+        gdk_event_free((GdkEvent *) touch.press);
+        touch.press = NULL;
+    }
+}
+
+/**
+ * Cancel a pending long press
+ */
+static void longpress_cancel(void) {
+    if (touch.longpress_source) {
+        g_source_remove(touch.longpress_source);
+        touch.longpress_source = 0;
+    }
+}
+
+/**
+ * Long press timer callback. Opens the popup menu so the menu is reachable
+ * with one finger; the two finger tap still works as it always did.
+ * @param data Menu widget
+ * @return Always false, the timer fires once
+ */
+static gboolean longpress_cb(gpointer data) {
+    touch.longpress_source = 0;
+    // The finger is still down. If vte saw the press it would sit in selection
+    // mode for as long as the menu is up, so hand it a release first.
+    if (touch.propagated && touch.press) {
+        gdk_test_simulate_button(touch.press->window,
+                                 (gint) touch.press->x, (gint) touch.press->y,
+                                 1, touch.press->state, GDK_BUTTON_RELEASE);
+        touch.propagated = FALSE;
+    }
+    touch_drop_press();
+    gtk_menu_popup(GTK_MENU(data), NULL, NULL, NULL, NULL, 0, gtk_get_current_event_time());
+    return FALSE;
+}
+
+/**
+ * Scroll the scrollback buffer by a finger drag
+ * @param terminal Terminal widget
+ * @param y Current pointer position
+ */
+static void touch_scroll_to(GtkWidget *terminal, gdouble y) {
+    GtkAdjustment *adj;
+    glong char_height;
+    gdouble value, lower, upper, page;
+    gint rows;
+
+#if VTE_CHECK_VERSION(0,38,0)
+    adj = gtk_scrollable_get_vadjustment(GTK_SCROLLABLE(terminal));
+#else
+    adj = vte_terminal_get_adjustment(VTE_TERMINAL(terminal));
+#endif
+    char_height = vte_terminal_get_char_height(VTE_TERMINAL(terminal));
+    if (!adj || char_height <= 0) { return; }
+
+    touch.accum += y - touch.last_y;
+    touch.last_y = y;
+    rows = (gint) (touch.accum / (gdouble) char_height);
+    if (rows == 0) { return; }
+    touch.accum -= rows * (gdouble) char_height;
+
+    // content follows the finger: drag down to reveal earlier lines
+    lower = gtk_adjustment_get_lower(adj);
+    upper = gtk_adjustment_get_upper(adj);
+    page = gtk_adjustment_get_page_size(adj);
+    value = gtk_adjustment_get_value(adj) - rows;
+    if (value > upper - page) { value = upper - page; }
+    if (value < lower) { value = lower; }
+    gtk_adjustment_set_value(adj, value);
+}
+#endif /* KINDLE */
 
 /**
  * Mouse button event callback
@@ -441,8 +627,37 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
     D printf("event-type: %i\n", event->type);
     D printf("event-button: %i\n", event->button);
 #ifdef KINDLE
-    // ignore any motion events (i think we don't need selecting text as one finger motion scrolls buffer)
-    if (event->type == GDK_MOTION_NOTIFY) { return TRUE; }
+    if (event->type == GDK_MOTION_NOTIFY) {
+        gdouble y = ((GdkEventMotion *) event)->y;
+        // a drag is not a long press
+        if (touch.longpress_source && ABS(y - touch.origin_y) > TOUCH_SCROLL_SLOP) {
+            longpress_cancel();
+        }
+        if (conf->touch_scroll) { touch_scroll_to(terminal, y); }
+        // never propagate: vte would start a selection, which is unusable here
+        return TRUE;
+    }
+    if (event->button == 1) {
+        if (event->type == GDK_BUTTON_PRESS) {
+            longpress_cancel();
+            touch_drop_press();
+            touch.origin_y = touch.last_y = event->y;
+            touch.accum = 0;
+            touch.propagated = conf->mouse_on;
+            touch.press = (GdkEventButton *) gdk_event_copy((GdkEvent *) event);
+            touch.longpress_source = g_timeout_add(TOUCH_LONGPRESS_MS, longpress_cb, menu);
+            return !touch.propagated;
+        }
+        if (event->type == GDK_BUTTON_RELEASE) {
+            // the release must always match what vte was told about the press,
+            // or vte is left sitting in selection mode with a phantom button down
+            gboolean propagate = touch.propagated;
+            longpress_cancel();
+            touch_drop_press();
+            touch.propagated = FALSE;
+            return !propagate;
+        }
+    }
 #endif
     if (event->button == BUTTON_MENU) {
 #ifdef KINDLE
@@ -507,10 +722,12 @@ static void usage(void) {
     printf("        -h            show this message\n");
     printf("        -k <0|1>      keyboard off/on\n");
     printf("        -l <path>     keyboard layout config path\n");
+    printf("        -m <0|1>      mouse reporting off/on\n");
 #ifdef KINDLE
     printf("        -o <U|R|L>    screen orientation (up, right, left)\n");
 #endif
     printf("        -s <size>     font size\n");
+    printf("        -S <0|1>      escape sequence shim (ktsh) off/on\n");
     printf("        -t <encoding> terminal encoding\n");
 #if VTE_CHECK_VERSION(0,20,0)
     printf("        -u <B|I|U>    cursor shape (block, I-beam, underline)\n");
@@ -530,6 +747,33 @@ static void setup_terminal(GtkWidget *terminal, gchar *command, gchar **envv, GE
     gchar *argv[TERM_ARGS_MAX] = { NULL };
     gint argc = 0;
     gchar *shell = NULL;
+    /* these outlive the call: vte only reads argv when it forks */
+    static gchar shim_path[PATH_MAX];
+    static gchar scheme_path[PATH_MAX];
+
+    /*
+     * Run the child under ktsh, which strips the escape sequences VTE 0.28
+     * would print as literal text, answers the color queries it cannot
+     * answer, and converts its legacy mouse reports to the SGR form modern
+     * applications expect. If the shim is missing we simply go without it.
+     */
+    if (conf->shim_on && sibling_path(SHIM_FILE, shim_path, sizeof(shim_path))
+        && is_executable(shim_path)) {
+        argv[argc++] = shim_path;
+        argv[argc++] = (gchar *) "-c";
+        argv[argc++] = conf->shim_color;
+        argv[argc++] = (gchar *) "-b";
+        argv[argc++] = (gchar *) (conf->color_reversed ? "dark" : "light");
+        if (sibling_path(SCHEME_FILE, scheme_path, sizeof(scheme_path))) {
+            argv[argc++] = (gchar *) "-s";
+            argv[argc++] = scheme_path;
+        }
+        argv[argc++] = (gchar *) "--";
+        D printf("shim: %s\n", shim_path);
+    } else if (conf->shim_on) {
+        D printf("shim not usable at '%s', running without it\n", shim_path);
+    }
+
 #if VTE_CHECK_VERSION(0,25,1)
     if (!command || *command == '\0') {
         // prepend args with shell
@@ -636,7 +880,7 @@ gint main(gint argc, gchar **argv) {
     // set terminfo path
     envv[envc++] = "TERMINFO=" TERMINFO_PATH;
 #endif
-    while((c = getopt(argc, argv, "c:de:E:f:hk:l:o:s:t:u:v")) != -1) {
+    while((c = getopt(argc, argv, "c:de:E:f:hk:l:m:o:s:S:t:u:v")) != -1) {
         switch(c) {
             case 'c':
                 i = atoi(optarg);
@@ -644,6 +888,9 @@ gint main(gint argc, gchar **argv) {
                 break;
             case 'd':
                 debug = TRUE;
+                // unbuffered, or a crash takes the trace with it when
+                // stdout is a pipe or a file rather than a terminal
+                setvbuf(stdout, NULL, _IONBF, 0);
                 break;
             case 'e':
                 command = optarg;
@@ -666,6 +913,14 @@ gint main(gint argc, gchar **argv) {
             case 'l':
                 snprintf(conf->kb_conf_path, sizeof(conf->kb_conf_path), "%s", optarg);
                 break;
+            case 'm':
+                i = atoi(optarg);
+                if ((i == TRUE) | (i == FALSE)) { conf->mouse_on = i; }
+                break;
+            case 'S':
+                i = atoi(optarg);
+                if ((i == TRUE) | (i == FALSE)) { conf->shim_on = i; }
+                break;
             case 'o':
                 if (optarg[0] == 'U' || optarg[0] == 'R' || optarg[0] == 'L') { conf->orientation = optarg[0]; }
                 break;
@@ -685,12 +940,33 @@ gint main(gint argc, gchar **argv) {
         }
     }
     
+    /*
+     * Tell the child what the terminal actually looks like. VTE 0.28 cannot
+     * answer an OSC 11 background color query, so without COLORFGBG every
+     * application from vim to Claude Code assumes a dark background and
+     * picks a palette that is unreadable on the light scheme.
+     * KTERM_SCHEME is the same information for ktsh, which answers the
+     * OSC query on VTE's behalf.
+     */
+    if (envc < TERM_ARGS_MAX - 2) {
+        envv[envc++] = conf->color_reversed ? (gchar *) "COLORFGBG=15;0"
+                                            : (gchar *) "COLORFGBG=0;15";
+        envv[envc++] = conf->color_reversed ? (gchar *) "KTERM_SCHEME=dark"
+                                            : (gchar *) "KTERM_SCHEME=light";
+    }
+    D printf("env: color_reversed=%i shim=%i mouse=%i\n",
+             conf->color_reversed, conf->shim_on, conf->mouse_on);
+    write_scheme_file(conf->color_reversed);
+    D printf("startup: scheme file written\n");
+
 #ifdef KINDLE
     orientation_init();
+    D printf("startup: orientation initialised\n");
 #endif
-    
+
     GError *error = NULL;
     gtk_init(&argc, &argv);
+    D printf("startup: gtk initialised\n");
 
     install_signal_handlers();
     
@@ -732,8 +1008,11 @@ gint main(gint argc, gchar **argv) {
     gtk_box_pack_end(GTK_BOX(vbox), keyboard_box, FALSE, FALSE, 0);
     keyboard_set_size(keyboard);
     
+    D printf("startup: keyboard built\n");
     GtkWidget *terminal = vte_terminal_new();
+    D printf("startup: terminal created\n");
     setup_terminal(terminal, command, envv, &error);
+    D printf("startup: terminal set up\n");
     if G_UNLIKELY(error) {
         error_handle(window, &error);
         clean_on_exit(keyboard);
@@ -743,6 +1022,7 @@ gint main(gint argc, gchar **argv) {
     gtk_box_pack_start(GTK_BOX(vbox), terminal, TRUE, TRUE, 0);
     
     GtkWidget *menu = build_popup(terminal, vbox);
+    D printf("startup: menu built\n");
     // signals
     g_signal_connect(window, "delete_event", G_CALLBACK(gtk_main_quit), NULL);
     g_signal_connect(terminal, "child-exited", G_CALLBACK(terminal_exit), NULL);

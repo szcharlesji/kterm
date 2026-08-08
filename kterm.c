@@ -545,6 +545,7 @@ static struct {
     gdouble accum;           /** Sub-row scroll remainder */
     gboolean moved;          /** Travelled past the slop threshold */
     gboolean precise;        /** Hold engaged: raw events go through to the app */
+    gboolean synthetic;      /** Dispatching our own event, do not classify it */
 } touch;
 
 /** Pointer device, needed so gtk3 does not complain about synthetic events */
@@ -588,7 +589,12 @@ static void send_button_event(GtkWidget *terminal, GdkEventType type,
 #else
     event->button.device = gdk_device_get_core_pointer();
 #endif
+    // gtk_main_do_event dispatches straight back into button_event, which
+    // would classify our own click as a new gesture and synthesise another
+    // one, forever. Mark the round trip so it is passed through instead.
+    touch.synthetic = TRUE;
     gtk_main_do_event(event);
+    touch.synthetic = FALSE;
     gdk_event_free(event);
 }
 
@@ -624,7 +630,9 @@ static void send_scroll_event(GtkWidget *terminal, GdkScrollDirection direction,
 #else
     event->scroll.device = gdk_device_get_core_pointer();
 #endif
+    touch.synthetic = TRUE;
     gtk_main_do_event(event);
+    touch.synthetic = FALSE;
     gdk_event_free(event);
 }
 
@@ -695,6 +703,8 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
     D printf("event-type: %i\n", event->type);
     D printf("event-button: %i\n", event->button);
 #ifdef KINDLE
+    // an event we generated ourselves: hand it to vte untouched
+    if (touch.synthetic) { return FALSE; }
     if (event->type == GDK_MOTION_NOTIFY) {
         GdkEventMotion *motion = (GdkEventMotion *) event;
         // precise drag: hand the motion over so the application can select

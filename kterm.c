@@ -543,9 +543,11 @@ static struct {
     gdouble origin_y;
     gdouble last_y;          /** Position at the previous motion event */
     gdouble accum;           /** Sub-row scroll remainder */
+    gboolean down;           /** A finger is actually down right now */
     gboolean moved;          /** Travelled past the slop threshold */
     gboolean precise;        /** Hold engaged: raw events go through to the app */
     gboolean synthetic;      /** Dispatching our own event, do not classify it */
+    guint32 press_time;      /** Timestamp of the press, for synthetic events */
 } touch;
 
 /** Pointer device, needed so gtk3 does not complain about synthetic events */
@@ -576,7 +578,10 @@ static void send_button_event(GtkWidget *terminal, GdkEventType type,
     event = gdk_event_new(type);
     event->button.window = g_object_ref(window);
     event->button.send_event = TRUE;
-    event->button.time = gtk_get_current_event_time();
+    // carry the real press time forward. A timeout has no current event, so
+    // gtk_get_current_event_time() would hand vte a zero timestamp and confuse
+    // its double click accounting.
+    event->button.time = touch.press_time;
     event->button.x = x;
     event->button.y = y;
     event->button.x_root = x;
@@ -707,6 +712,12 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
     if (touch.synthetic) { return FALSE; }
     if (event->type == GDK_MOTION_NOTIFY) {
         GdkEventMotion *motion = (GdkEventMotion *) event;
+        // A touch lands as a pointer warp: X delivers motion to the new
+        // position before the press. Classifying that as a drag turned every
+        // tap into a scroll, and scrolled the content out from under a hold
+        // before the selection had started. Only motion while a finger is
+        // genuinely down is part of a gesture.
+        if (!touch.down) { return TRUE; }
         // precise drag: hand the motion over so the application can select
         // text or drag a pane divider
         if (touch.precise) { return FALSE; }
@@ -725,8 +736,10 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
             touch.origin_x = event->x;
             touch.origin_y = touch.last_y = event->y;
             touch.accum = 0;
+            touch.down = TRUE;
             touch.moved = FALSE;
             touch.precise = FALSE;
+            touch.press_time = event->time;
             touch.longpress_source = g_timeout_add(TOUCH_LONGPRESS_MS, longpress_cb, terminal);
             // swallow for now: a press alone does not tell us what this is yet
             return TRUE;
@@ -737,6 +750,7 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
             longpress_cancel();
             touch.precise = FALSE;
             touch.moved = FALSE;
+            touch.down = FALSE;
             // a precise drag opened with a real press, so it needs the real release
             if (was_precise) { return FALSE; }
             if (was_tap && conf->mouse_on) {

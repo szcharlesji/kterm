@@ -79,6 +79,7 @@ typedef struct {
     unsigned long n_color_queries;
     unsigned long n_mouse_rewritten;
     unsigned long n_truecolor;
+    unsigned long n_clipboard;
 } KtFilter;
 
 void ktfilter_init(KtFilter *f);

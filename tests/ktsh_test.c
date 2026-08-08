@@ -333,6 +333,37 @@ static void test_split_writes(void) {
     ktbuf_free(&out); ktfilter_free(&f);
 }
 
+static void test_clipboard(void) {
+    KtFilter f;
+    KtBuf out, reply;
+    char buf[64];
+    FILE *fp;
+    printf("OSC 52 clipboard export\n");
+    ktfilter_init(&f);
+    f.clipboard_path = strdup("/tmp/ktsh-test-clip");
+    remove(f.clipboard_path);
+    ktbuf_init(&out); ktbuf_init(&reply);
+
+    /* base64 of "hello kterm" */
+    down(&f, "\033]52;c;aGVsbG8ga3Rlcm0=\007", &out, &reply);
+    expect("clipboard sequence leaves no screen output", &out, "");
+    buf[0] = '\0';
+    if ((fp = fopen(f.clipboard_path, "r")) != NULL) {
+        size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+        buf[n] = '\0';
+        fclose(fp);
+    }
+    expect_int("payload decoded and stored", strcmp(buf, "hello kterm") == 0, 1);
+    expect_int("clipboard write counted", (long) f.n_clipboard, 1);
+
+    /* a query must not clobber what is already there */
+    down(&f, "\033]52;c;?\007", &out, &reply);
+    expect_int("query did not overwrite", (long) f.n_clipboard, 1);
+
+    remove(f.clipboard_path);
+    ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
+}
+
 static void test_gray_mode(void) {
     KtFilter f;
     KtBuf out, reply;
@@ -363,6 +394,7 @@ int main(void) {
     test_mouse_translation();
     test_escape_key_not_swallowed();
     test_split_writes();
+    test_clipboard();
     test_gray_mode();
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

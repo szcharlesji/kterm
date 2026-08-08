@@ -406,18 +406,39 @@ static void kt_handle_csi(KtFilter *f, KtBuf *out) {
 /* OSC                                                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Hand a clipboard payload over to kterm, which owns the gtk clipboard.
+ * Written through a temporary file and renamed, so kterm can never observe a
+ * half written clipboard.
+ * @param f Filter state
+ * @param b64 Base64 payload
+ * @param n Payload length
+ */
 static void kt_write_clipboard(KtFilter *f, const char *b64, size_t n) {
     unsigned char *buf;
+    char tmp[1024];
     int len;
     FILE *fp;
-    if (!f->clipboard_path) { return; }
+
+    if (!f->clipboard_path || n == 0) { return; }
+    /* "?" is an application asking to read the clipboard, not to set it */
+    if (b64[0] == '?') { return; }
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", f->clipboard_path) >= (int) sizeof(tmp)) { return; }
+
     buf = malloc(n + 1);
     if (!buf) { return; }
     len = kt_base64_decode(b64, n, buf, n);
-    fp = fopen(f->clipboard_path, "wb");
-    if (fp) {
-        if (len > 0) { fwrite(buf, 1, (size_t) len, fp); }
-        fclose(fp);
+    if (len <= 0) { free(buf); return; }
+
+    if ((fp = fopen(tmp, "wb")) != NULL) {
+        size_t written = fwrite(buf, 1, (size_t) len, fp);
+        int ok = (fclose(fp) == 0) && (written == (size_t) len);
+        if (ok) {
+            if (rename(tmp, f->clipboard_path) != 0) { remove(tmp); }
+            else { f->n_clipboard++; }
+        } else {
+            remove(tmp);
+        }
     }
     free(buf);
 }

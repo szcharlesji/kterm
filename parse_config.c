@@ -82,6 +82,7 @@ KTconf *parse_config(void) {
     conf->shim_on = TRUE;
     conf->mouse_on = TRUE;
     conf->touch_scroll = TRUE;
+    conf->statusbar_on = TRUE;
     snprintf(conf->shim_color, sizeof(conf->shim_color), "256");
     snprintf(conf->conf_path, sizeof(conf->conf_path), "%s", conf_path);
 
@@ -174,6 +175,14 @@ KTconf *parse_config(void) {
             if (touch_scroll == 0 || touch_scroll == 1) {
                 conf->touch_scroll = touch_scroll;
                 D printf("touch_scroll = %i\n", conf->touch_scroll);
+            }
+        }
+        else if (!strncmp(buf, "statusbar", 9)) {
+            gint statusbar_on = -1;
+            sscanf(buf, "statusbar = %i", &statusbar_on);
+            if (statusbar_on == 0 || statusbar_on == 1) {
+                conf->statusbar_on = statusbar_on;
+                D printf("statusbar = %i\n", conf->statusbar_on);
             }
         }
         else if (!strncmp(buf, "color_folding", 13)) {

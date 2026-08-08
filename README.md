@@ -5,7 +5,28 @@ This is a simple GTK+ terminal emulator with embedded virtual keyboard. It is ba
 
 Kterm has been developed for Kindle Touch. It is reported to also work on Paperwhites. Generally it should work on any platform which supports GTK+, either version 2 or 3.
 
-On Kindle the menu pops up on a two finger tap, or on a long press with one finger. On other devices on right button mouse click. A one finger drag scrolls the scrollback buffer.
+#### Touch
+
+kterm mediates button 1 rather than handing it straight to the terminal,
+because at press time a tap, a drag and a hold are indistinguishable. The
+gesture is classified as it develops:
+
+| gesture | result |
+| --- | --- |
+| tap | click at that cell |
+| drag | scroll |
+| hold ~600 ms, then drag | precise drag: real press/motion/release reach the application, so text selection and dragging a pane divider work |
+| two finger tap | popup menu (right mouse button elsewhere) |
+| status bar button | popup menu |
+
+Dragging emits scroll events rather than moving the scrollback directly. That
+detail matters: VTE reports a wheel button to the application when it has asked
+for mouse tracking and scrolls its own buffer when it has not, so the same
+gesture pages a full screen TUI and scrolls the scrollback at a shell without
+kterm having to work out which one is in front.
+
+A status bar above the terminal shows the clock, date and battery and carries a
+menu button. Set `statusbar = 0` to hide it.
 
 #### The escape sequence shim (`ktsh`)
 

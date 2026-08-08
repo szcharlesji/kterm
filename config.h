@@ -85,10 +85,22 @@
 #define KT_PALETTE_SIZE 16
 /** Where kterm records the active scheme so the shim can answer color queries */
 #define SCHEME_FILE ".kterm-scheme"
-/** Hold this long with one finger to open the popup menu */
+/** Hold this long with one finger to switch a drag into a precise drag */
 #define TOUCH_LONGPRESS_MS 600
 /** Ignore drags shorter than this many pixels before scrolling */
 #define TOUCH_SCROLL_SLOP 12
+/** Most scroll steps emitted from one motion event, so a flick cannot flood */
+#define TOUCH_SCROLL_MAX_STEP 8
+/** How often the status bar refreshes, in seconds */
+#define STATUSBAR_INTERVAL_S 60
+/** Status bar font size relative to the terminal font */
+#define STATUSBAR_FONT_BUMP 1
+/** Status bar label padding, px */
+#define STATUSBAR_PAD 8
+/** Menu button width, mm. Wide enough to hit without aiming */
+#define STATUSBAR_BUTTON_MM 9.0
+/** Status bar height, mm */
+#define STATUSBAR_HEIGHT_MM 6.5
 
 /** Terminal scrollback size */
 #define VTE_SCROLLBACK_LINES 200
@@ -124,9 +136,13 @@ typedef struct {
     gboolean shim_on;  /** Route the child process through the ktsh shim */
     gboolean mouse_on;  /** Report taps to the application as mouse events */
     gboolean touch_scroll;  /** One finger drag scrolls the scrollback buffer */
+    gboolean statusbar_on;  /** Show the clock/battery/menu strip above the terminal */
     gchar shim_color[8];  /** How ktsh folds 24-bit color: 256, gray or keep */
     gchar conf_path[PATH_MAX];  /** Config file this was read from, for saving */
 } KTconf;
+
+/** Global config, defined in kterm.c */
+extern KTconf *conf;
 
 KTconf * parse_config(void);
 void save_config(const KTconf *conf);

@@ -85,8 +85,14 @@
 #define KT_PALETTE_SIZE 16
 /** Where kterm records the active scheme so the shim can answer color queries */
 #define SCHEME_FILE ".kterm-scheme"
-/** Hold this long with one finger to switch a drag into a precise drag */
+/** Where the shim drops text an application copied with OSC 52 */
+#define CLIPBOARD_FILE ".kterm-clipboard"
+/** Largest clipboard payload accepted from an application, bytes */
+#define CLIPBOARD_MAX (256 * 1024)
+/** Default hold before a drag becomes a precise drag, ms */
 #define TOUCH_LONGPRESS_MS 600
+/** Default drag scroll speed, percent. 100 is one row per row of travel */
+#define TOUCH_SCROLL_SPEED 100
 /** Ignore drags shorter than this many pixels before scrolling */
 #define TOUCH_SCROLL_SLOP 12
 /** Most scroll steps emitted from one motion event, so a flick cannot flood */
@@ -137,6 +143,8 @@ typedef struct {
     gboolean mouse_on;  /** Report taps to the application as mouse events */
     gboolean touch_scroll;  /** One finger drag scrolls the scrollback buffer */
     gboolean statusbar_on;  /** Show the clock/battery/menu strip above the terminal */
+    guint touch_hold_ms;  /** Hold before a drag becomes a precise drag */
+    guint touch_scroll_speed;  /** Drag scroll speed, percent of one row per row */
     gchar shim_color[8];  /** How ktsh folds 24-bit color: 256, gray or keep */
     gchar conf_path[PATH_MAX];  /** Config file this was read from, for saving */
 } KTconf;

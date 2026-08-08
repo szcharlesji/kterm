@@ -424,12 +424,40 @@ static void menu_deactivate_cb(GtkWidget *widget, gpointer data) {
 #endif
 
 /**
+ * Adopt anything an application copied with OSC 52.
+ * The shim decodes the payload to a file, because it runs in its own process
+ * and cannot reach gtk's clipboard. Loading is done here, on demand, so there
+ * is no timer polling a file on a battery powered device.
+ * @return True when the clipboard was updated
+ */
+static gboolean load_app_clipboard(void) {
+    static time_t last_seen = 0;
+    gchar path[PATH_MAX];
+    struct stat st;
+    gchar *text = NULL;
+    gsize len = 0;
+
+    if (!sibling_path(CLIPBOARD_FILE, path, sizeof(path))) { return FALSE; }
+    if (stat(path, &st) != 0 || st.st_mtime == last_seen) { return FALSE; }
+    if (st.st_size <= 0 || st.st_size > CLIPBOARD_MAX) { return FALSE; }
+    if (!g_file_get_contents(path, &text, &len, NULL)) { return FALSE; }
+
+    last_seen = st.st_mtime;
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_CLIPBOARD), text, (gint) len);
+    gtk_clipboard_set_text(gtk_clipboard_get(GDK_SELECTION_PRIMARY), text, (gint) len);
+    D printf("clipboard: adopted %zu bytes from the application\n", (size_t) len);
+    g_free(text);
+    return TRUE;
+}
+
+/**
  * Paste menu callback
  * @param widget Calling widget
  * @param terminal Terminal
  */
 static void paste_clipboard(GtkWidget *widget, gpointer terminal) {
     UNUSED(widget);
+    load_app_clipboard();
     vte_terminal_paste_clipboard(VTE_TERMINAL(terminal));
 }
 
@@ -677,14 +705,17 @@ static gboolean longpress_cb(gpointer data) {
 static void touch_scroll_drag(GtkWidget *terminal, gdouble y) {
     glong char_height = vte_terminal_get_char_height(VTE_TERMINAL(terminal));
     GdkScrollDirection direction;
+    gdouble step;
     gint rows, steps, i;
 
     if (char_height <= 0) { return; }
     touch.accum += y - touch.last_y;
     touch.last_y = y;
-    rows = (gint) (touch.accum / (gdouble) char_height);
+    step = (gdouble) char_height * 100.0 / (gdouble) conf->touch_scroll_speed;
+    if (step < 1.0) { step = 1.0; }
+    rows = (gint) (touch.accum / step);
     if (rows == 0) { return; }
-    touch.accum -= rows * (gdouble) char_height;
+    touch.accum -= rows * step;
 
     // content follows the finger: dragging down reveals earlier lines
     direction = (rows > 0) ? GDK_SCROLL_UP : GDK_SCROLL_DOWN;
@@ -740,7 +771,7 @@ static gboolean button_event(GtkWidget *terminal, GdkEventButton *event, gpointe
             touch.moved = FALSE;
             touch.precise = FALSE;
             touch.press_time = event->time;
-            touch.longpress_source = g_timeout_add(TOUCH_LONGPRESS_MS, longpress_cb, terminal);
+            touch.longpress_source = g_timeout_add(conf->touch_hold_ms, longpress_cb, terminal);
             // swallow for now: a press alone does not tell us what this is yet
             return TRUE;
         }
@@ -853,6 +884,7 @@ static void setup_terminal(GtkWidget *terminal, gchar *command, gchar **envv, GE
     /* these outlive the call: vte only reads argv when it forks */
     static gchar shim_path[PATH_MAX];
     static gchar scheme_path[PATH_MAX];
+    static gchar clip_path[PATH_MAX];
 
     /*
      * Run the child under ktsh, which strips the escape sequences VTE 0.28
@@ -870,6 +902,10 @@ static void setup_terminal(GtkWidget *terminal, gchar *command, gchar **envv, GE
         if (sibling_path(SCHEME_FILE, scheme_path, sizeof(scheme_path))) {
             argv[argc++] = (gchar *) "-s";
             argv[argc++] = scheme_path;
+        }
+        if (sibling_path(CLIPBOARD_FILE, clip_path, sizeof(clip_path))) {
+            argv[argc++] = (gchar *) "-C";
+            argv[argc++] = clip_path;
         }
         argv[argc++] = (gchar *) "--";
         D printf("shim: %s\n", shim_path);

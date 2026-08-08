@@ -26,6 +26,21 @@
 #include "config.h"
 
 /**
+ * Does this line assign the named key?
+ * A bare strncmp lets a shorter key swallow a longer one that starts with it,
+ * so touch_scroll would match touch_scroll_speed and the longer key would
+ * never be reachable. Require a delimiter after the name.
+ * @param line Config line
+ * @param key Key name
+ * @return True when the line sets exactly this key
+ */
+static gboolean key_is(const gchar *line, const gchar *key) {
+    gsize len = strlen(key);
+    if (strncmp(line, key, len) != 0) { return FALSE; }
+    return line[len] == ' ' || line[len] == '=' || line[len] == '\t';
+}
+
+/**
  * Directory holding the running kterm binary
  * @param buf Buffer receiving the path
  * @param len Buffer size
@@ -83,6 +98,8 @@ KTconf *parse_config(void) {
     conf->mouse_on = TRUE;
     conf->touch_scroll = TRUE;
     conf->statusbar_on = TRUE;
+    conf->touch_hold_ms = TOUCH_LONGPRESS_MS;
+    conf->touch_scroll_speed = TOUCH_SCROLL_SPEED;
     snprintf(conf->shim_color, sizeof(conf->shim_color), "256");
     snprintf(conf->conf_path, sizeof(conf->conf_path), "%s", conf_path);
 
@@ -95,7 +112,7 @@ KTconf *parse_config(void) {
     gchar buf[PATH_MAX];
     while (fgets(buf, sizeof(buf), fp)) {
         if (buf[0] == '#' || buf[0] == '\n') { continue; }
-        if (!strncmp(buf, "keyboard", 8)) {
+        if (key_is(buf, "keyboard")) {
             gint kb_on = -1;
             sscanf(buf, "keyboard = %i", &kb_on);
             if (kb_on == 0 || kb_on == 1) {
@@ -103,7 +120,7 @@ KTconf *parse_config(void) {
                 D printf("kb_on = %i\n", conf->kb_on);
             }
         }
-        else if (!strncmp(buf, "color_scheme", 12)) {
+        else if (key_is(buf, "color_scheme")) {
             gint color_reversed = -1;
             sscanf(buf, "color_scheme = %i", &color_reversed);
             if (color_reversed == 0 || color_reversed == 1) {
@@ -111,13 +128,13 @@ KTconf *parse_config(void) {
                 D printf("color_scheme = %i\n", conf->color_reversed);
             }
         }
-        else if (!strncmp(buf, "font_family", 11)) {
+        else if (key_is(buf, "font_family")) {
             gchar str[256];
             sscanf(buf, "font_family = \"%[^\"\n\r]\"", str);
             snprintf(conf->font_family, sizeof(conf->font_family), "%s", str);
             D printf("font_family = %s\n", conf->font_family);
         }
-        else if (!strncmp(buf, "font_size", 9)) {
+        else if (key_is(buf, "font_size")) {
             guint font_size = 0;
             sscanf(buf, "font_size = %u", &font_size);
             if (font_size > 0) {
@@ -125,19 +142,19 @@ KTconf *parse_config(void) {
                 D printf("font_size = %u\n", conf->font_size);
             }
         }
-        else if (!strncmp(buf, "encoding", 8)) {
+        else if (key_is(buf, "encoding")) {
             gchar str[256];
             sscanf(buf, "encoding = \"%[^\"\n\r]\"", str);
             snprintf(conf->encoding, sizeof(conf->encoding), "%s", str);
             D printf("encoding = %s\n", conf->encoding);
         }
-        else if (!strncmp(buf, "kb_conf_path", 12)) {
+        else if (key_is(buf, "kb_conf_path")) {
             gchar str2[PATH_MAX];
             sscanf(buf, "kb_conf_path = \"%[^\"\n\r]\"", str2); // need double quotes around path
             snprintf(conf->kb_conf_path, sizeof(conf->kb_conf_path), "%s", str2);
             D printf("kb_conf_path = %s\n", conf->kb_conf_path);
         }
-        else if (!strncmp(buf, "orientation", 11)) {
+        else if (key_is(buf, "orientation")) {
             gchar orientation = 0;
             sscanf(buf, "orientation = %c", &orientation);
             if (orientation == 'U' || orientation == 'R' || orientation == 'L') {
@@ -145,7 +162,7 @@ KTconf *parse_config(void) {
                 D printf("orientation = %c\n", conf->orientation);
             }
         }
-        else if (!strncmp(buf, "cursor_shape", 12)) {
+        else if (key_is(buf, "cursor_shape")) {
             gchar cursor_shape = 0;
             sscanf(buf, "cursor_shape = %c", &cursor_shape);
             if (cursor_shape == 'B' || cursor_shape == 'I' || cursor_shape == 'U') {
@@ -153,7 +170,7 @@ KTconf *parse_config(void) {
                 D printf("cursor_shape = %c\n", conf->cursor_shape);
             }
         }
-        else if (!strncmp(buf, "shim", 4)) {
+        else if (key_is(buf, "shim")) {
             gint shim_on = -1;
             sscanf(buf, "shim = %i", &shim_on);
             if (shim_on == 0 || shim_on == 1) {
@@ -161,7 +178,7 @@ KTconf *parse_config(void) {
                 D printf("shim = %i\n", conf->shim_on);
             }
         }
-        else if (!strncmp(buf, "mouse_report", 12)) {
+        else if (key_is(buf, "mouse_report")) {
             gint mouse_on = -1;
             sscanf(buf, "mouse_report = %i", &mouse_on);
             if (mouse_on == 0 || mouse_on == 1) {
@@ -169,7 +186,7 @@ KTconf *parse_config(void) {
                 D printf("mouse_report = %i\n", conf->mouse_on);
             }
         }
-        else if (!strncmp(buf, "touch_scroll", 12)) {
+        else if (key_is(buf, "touch_scroll")) {
             gint touch_scroll = -1;
             sscanf(buf, "touch_scroll = %i", &touch_scroll);
             if (touch_scroll == 0 || touch_scroll == 1) {
@@ -177,7 +194,23 @@ KTconf *parse_config(void) {
                 D printf("touch_scroll = %i\n", conf->touch_scroll);
             }
         }
-        else if (!strncmp(buf, "statusbar", 9)) {
+        else if (key_is(buf, "touch_hold_ms")) {
+            guint hold = 0;
+            sscanf(buf, "touch_hold_ms = %u", &hold);
+            if (hold >= 100 && hold <= 5000) {
+                conf->touch_hold_ms = hold;
+                D printf("touch_hold_ms = %u\n", conf->touch_hold_ms);
+            }
+        }
+        else if (key_is(buf, "touch_scroll_speed")) {
+            guint speed = 0;
+            sscanf(buf, "touch_scroll_speed = %u", &speed);
+            if (speed >= 10 && speed <= 1000) {
+                conf->touch_scroll_speed = speed;
+                D printf("touch_scroll_speed = %u\n", conf->touch_scroll_speed);
+            }
+        }
+        else if (key_is(buf, "statusbar")) {
             gint statusbar_on = -1;
             sscanf(buf, "statusbar = %i", &statusbar_on);
             if (statusbar_on == 0 || statusbar_on == 1) {
@@ -185,7 +218,7 @@ KTconf *parse_config(void) {
                 D printf("statusbar = %i\n", conf->statusbar_on);
             }
         }
-        else if (!strncmp(buf, "color_folding", 13)) {
+        else if (key_is(buf, "color_folding")) {
             gchar str[256] = { 0 };
             sscanf(buf, "color_folding = \"%[^\"\n\r]\"", str);
             if (!strcmp(str, "256") || !strcmp(str, "gray") || !strcmp(str, "keep")) {

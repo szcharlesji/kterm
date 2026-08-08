@@ -25,8 +25,22 @@ for mouse tracking and scrolls its own buffer when it has not, so the same
 gesture pages a full screen TUI and scrolls the scrollback at a shell without
 kterm having to work out which one is in front.
 
+`touch_hold_ms` and `touch_scroll_speed` tune the hold delay and the scroll
+rate without a rebuild.
+
 A status bar above the terminal shows the clock, date and battery and carries a
 menu button. Set `statusbar = 0` to hide it.
+
+#### Clipboard
+
+An application that copies with `OSC 52` (nvim with `clipboard=osc52`, tmux with
+`set-clipboard on`) reaches kterm's clipboard: ktsh decodes the payload to a
+file and Paste loads it. The hand-off goes through a file because ktsh runs in
+its own process and cannot touch GTK's clipboard, and it is read on demand
+rather than polled, so nothing wakes the CPU on battery.
+
+Note that a TUI doing its own selection does not necessarily export it. Check
+with `ktsh -d` and look for `]52` before assuming kterm is at fault.
 
 #### The escape sequence shim (`ktsh`)
 

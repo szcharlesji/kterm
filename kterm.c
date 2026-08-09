@@ -31,6 +31,7 @@
 #include <getopt.h>
 #include "keyboard.h"
 #include "statusbar.h"
+#include "graphics.h"
 #ifdef KINDLE
 #include "kindle.h"
 #endif
@@ -1195,6 +1196,7 @@ gint main(gint argc, gchar **argv) {
     UNUSED(statusbar);
     g_signal_connect(keyboard_box, "size-allocate", G_CALLBACK(keyboard_update), keyboard);
     gtk_window_maximize(GTK_WINDOW(window));
+    if (getenv("KTERM_GFX_SPIKE")) { graphics_spike(terminal); }
     gtk_main();
     
     clean_on_exit(keyboard);

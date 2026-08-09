@@ -1,5 +1,5 @@
 bin_PROGRAMS = kterm ktsh
-kterm_SOURCES = keyboard.c kterm.c parse_config.c parse_layout.c statusbar.c
+kterm_SOURCES = keyboard.c kterm.c parse_config.c parse_layout.c statusbar.c graphics.c
 if KINDLE
 kterm_SOURCES += kindle.c
 endif

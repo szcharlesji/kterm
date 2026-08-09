@@ -24,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -167,6 +169,29 @@ int main(int argc, char **argv) {
         shell_argv[0] = (char *) sh;
         shell_argv[1] = NULL;
         cmd = shell_argv;
+    }
+
+    /*
+     * kterm listens on this socket and draws whatever we send it. Without
+     * it the filter still strips graphics sequences off the screen, it
+     * just has nowhere to put the pictures.
+     */
+    if (filter.graphics) {
+        const char *sockpath = getenv("KTERM_GFX_SOCK");
+        if (sockpath && *sockpath) {
+            struct sockaddr_un sa;
+            int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (fd >= 0) {
+                memset(&sa, 0, sizeof(sa));
+                sa.sun_family = AF_UNIX;
+                snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", sockpath);
+                if (connect(fd, (struct sockaddr *) &sa, sizeof(sa)) == 0) {
+                    filter.gfx_fd = fd;
+                } else {
+                    close(fd);
+                }
+            }
+        }
     }
 
     if (getenv("KTSH_DISABLE")) {

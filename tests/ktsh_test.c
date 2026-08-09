@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../ktsh.h"
 
@@ -307,6 +308,87 @@ static void test_kitty_graphics(void) {
     ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
 }
 
+/* Read back everything the filter wrote to its kterm socket */
+static size_t drain_gfx(int fd, char *buf, size_t max) {
+    ssize_t got;
+    lseek(fd, 0, SEEK_SET);
+    got = read(fd, buf, max - 1);
+    if (got < 0) { got = 0; }
+    buf[got] = '\0';
+    lseek(fd, 0, SEEK_SET);
+    if (ftruncate(fd, 0) != 0) { /* best effort */ }
+    return (size_t) got;
+}
+
+/*
+ * Transmission. The application sends the image in base64 chunks and
+ * expects it to appear at the cursor, which only VTE knows the position
+ * of - hence the injected cursor report and the deferred placement.
+ */
+static void test_kitty_transmission(void) {
+    KtFilter f;
+    KtBuf out, reply;
+    char sock[4096];
+    char tmpl[] = "/tmp/ktsh_gfx_XXXXXX";
+    int fd = mkstemp(tmpl);
+
+    printf("kitty graphics transmission\n");
+    ktfilter_init(&f);
+    ktbuf_init(&out); ktbuf_init(&reply);
+    f.gfx_fd = fd;
+
+    /* "hello world!" split over three chunks, exactly as snacks sends it */
+    down(&f, "\033_Ga=T,f=100,c=10,r=4,m=1;aGVsbG8g\033\\", &out, &reply);
+    down(&f, "\033_Gm=1;d29ybGQ\033\\", &out, &reply);
+    down(&f, "\033_Gm=0;h\033\\", &out, &reply);
+
+    expect("transmission prints nothing", &out, "\033[6n");
+    drain_gfx(fd, sock, sizeof(sock));
+    checks++;
+    if (strncmp(sock, "IMG 0 100 0 0 12\nhello world!", 29) == 0) {
+        printf("  ok   chunks reassembled and decoded\n");
+    } else {
+        failures++;
+        printf("  FAIL chunks reassembled and decoded\n       got : %s\n", sock);
+    }
+
+    /* VTE answers the cursor query; the application must never see it */
+    ktbuf_clear(&out);
+    up(&f, "\033[7;3R", 6, &out);
+    expect("cursor report swallowed", &out, "");
+    drain_gfx(fd, sock, sizeof(sock));
+    checks++;
+    if (strcmp(sock, "PLACE 0 10 4 7 3\n") == 0) {
+        printf("  ok   placement carries cell box and cursor\n");
+    } else {
+        failures++;
+        printf("  FAIL placement carries cell box and cursor\n       got : %s\n", sock);
+    }
+
+    /* a real keystroke either side of it still gets through untouched */
+    ktbuf_clear(&out);
+    up(&f, "x", 1, &out);
+    expect("keystrokes unaffected once settled", &out, "x");
+
+    /* delete */
+    ktbuf_clear(&out);
+    down(&f, "\033_Ga=d,i=5;\033\\", &out, &reply);
+    drain_gfx(fd, sock, sizeof(sock));
+    checks++;
+    if (strcmp(sock, "DEL 5\n") == 0) { printf("  ok   delete forwarded\n"); }
+    else { failures++; printf("  FAIL delete forwarded\n       got : %s\n", sock); }
+
+    /* transports naming a path on the far side of an ssh link are useless */
+    ktbuf_clear(&out);
+    down(&f, "\033_Ga=T,t=f,f=100;L3RtcC94LnBuZw\033\\", &out, &reply);
+    drain_gfx(fd, sock, sizeof(sock));
+    expect_int("file transport ignored", (long) strlen(sock), 0);
+
+    ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
+    close(fd);
+    unlink(tmpl);
+}
+
 static void test_mouse_translation(void) {
     KtFilter f;
     KtBuf out;
@@ -452,6 +534,7 @@ int main(void) {
     test_modern_csi();
     test_dcs();
     test_kitty_graphics();
+    test_kitty_transmission();
     test_mouse_translation();
     test_escape_key_not_swallowed();
     test_split_writes();

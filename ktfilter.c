@@ -14,6 +14,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <errno.h>
 
 #include "ktsh.h"
 
@@ -157,16 +159,38 @@ static int kt_atoi(const char *s) {
     return v;
 }
 
+/*
+ * base64, decode only; the protocol never asks us to encode. A lookup
+ * table rather than a search: image payloads run to megabytes, where a
+ * linear scan of the alphabet per byte is real work.
+ */
+static const signed char kt_b64[256] = {
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+    52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+};
+
 static int kt_base64_decode(const char *in, size_t inlen, unsigned char *out, size_t outmax) {
-    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    int acc = 0, bits = 0;
+    unsigned long acc = 0;
+    int bits = 0;
     size_t i, n = 0;
     for (i = 0; i < inlen; i++) {
-        const char *q;
-        if (in[i] == '=') { break; }
-        q = memchr(tbl, in[i], 64);
-        if (!q) { continue; }
-        acc = (acc << 6) | (int) (q - tbl);
+        signed char v = kt_b64[(unsigned char) in[i]];
+        if (v < 0) { continue; }
+        acc = (acc << 6) | (unsigned long) v;
         bits += 6;
         if (bits >= 8) {
             bits -= 8;
@@ -174,6 +198,40 @@ static int kt_base64_decode(const char *in, size_t inlen, unsigned char *out, si
         }
     }
     return (int) n;
+}
+
+/*
+ * Same, appending to a growable buffer, for payloads of unknown size.
+ * The accumulator is caller owned so a payload can be fed in over several
+ * calls: a chunk boundary need not fall on a base64 quantum, and any bits
+ * left over from one chunk belong to the first byte of the next.
+ */
+static void kt_b64_decode(KtBuf *out, const char *s, size_t n,
+                          unsigned long *acc, int *bits) {
+    size_t i;
+    for (i = 0; i < n; i++) {
+        signed char v = kt_b64[(unsigned char) s[i]];
+        if (v < 0) { continue; }
+        *acc = (*acc << 6) | (unsigned long) v;
+        *bits += 6;
+        if (*bits >= 8) {
+            *bits -= 8;
+            ktbuf_addc(out, (unsigned char) ((*acc >> *bits) & 0xff));
+        }
+    }
+}
+
+static void kt_gfx_send(KtFilter *f, const char *header,
+                        const unsigned char *data, size_t len);
+
+/*
+ * Anything that wipes the screen has to take the images with it. VTE
+ * never tells us which cells were cleared, so these few sequences are
+ * the whole of our invalidation: erase-display, the alternate screen
+ * switch that full screen applications use, and a hard reset.
+ */
+static void kt_gfx_invalidate(KtFilter *f) {
+    if (f->graphics && f->gfx_fd >= 0) { kt_gfx_send(f, "DELALL\n", NULL, 0); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -184,8 +242,10 @@ void ktfilter_init(KtFilter *f) {
     memset(f, 0, sizeof(*f));
     ktbuf_init(&f->pending);
     ktbuf_init(&f->in_pending);
+    ktbuf_init(&f->gfx_data);
     f->state = KT_GROUND;
     f->graphics = 1;
+    f->gfx_fd = -1;          /* memset left it 0, which is stdin */
     f->color_mode = KT_COLOR_256;
     f->last_button = 0;
     strcpy(f->fg_spec, "rgb:0000/0000/0000");
@@ -195,6 +255,7 @@ void ktfilter_init(KtFilter *f) {
 void ktfilter_free(KtFilter *f) {
     ktbuf_free(&f->pending);
     ktbuf_free(&f->in_pending);
+    ktbuf_free(&f->gfx_data);
     free(f->clipboard_path);
     free(f->scheme_path);
     f->clipboard_path = NULL;
@@ -401,8 +462,13 @@ static void kt_handle_csi(KtFilter *f, KtBuf *out, KtBuf *reply) {
     }
 
     if ((final == 'h' || final == 'l') && priv == '?') {
+        if (strstr(params, "1049") || strstr(params, "47")) { kt_gfx_invalidate(f); }
         kt_handle_decset(f, params, final == 'h', out);
         return;
+    }
+    if (final == 'J' && priv == 0) {
+        int op = kt_atoi(params);
+        if (op == 2 || op == 3) { kt_gfx_invalidate(f); }
     }
     if (final == 'm' && priv == 0) {
         kt_handle_sgr(f, params, out);
@@ -552,7 +618,15 @@ typedef struct {
     long number;     /**< I= */
     int has_id;
     int has_number;
+    int more;        /**< m= : another chunk follows */
+    int fmt;         /**< f= : 100 png, 32 rgba, 24 rgb */
+    int width;       /**< s= : pixel width, only meaningful for raw formats */
+    int height;      /**< v= */
+    int cols;        /**< c= : width in cells the application wants */
+    int rows;        /**< r= */
+    int transport;   /**< t= : 'd' direct, 'f' file, 't' temp file, 's' shm */
 } KtGfx;
+
 
 static long kt_gfx_num(const char *v, size_t n) {
     char tmp[32];
@@ -592,6 +666,13 @@ static void kt_gfx_parse(const char *s, size_t n, KtGfx *g) {
             case 'q': g->quiet = (int) kt_gfx_num(val, vlen); break;
             case 'i': g->id = kt_gfx_num(val, vlen); g->has_id = 1; break;
             case 'I': g->number = kt_gfx_num(val, vlen); g->has_number = 1; break;
+            case 'm': g->more = (int) kt_gfx_num(val, vlen); break;
+            case 'f': g->fmt = (int) kt_gfx_num(val, vlen); break;
+            case 's': g->width = (int) kt_gfx_num(val, vlen); break;
+            case 'v': g->height = (int) kt_gfx_num(val, vlen); break;
+            case 'c': g->cols = (int) kt_gfx_num(val, vlen); break;
+            case 'r': g->rows = (int) kt_gfx_num(val, vlen); break;
+            case 't': if (vlen) { g->transport = (unsigned char) val[0]; } break;
             default: break;
         }
     }
@@ -608,34 +689,144 @@ static void kt_gfx_parse(const char *s, size_t n, KtGfx *g) {
  * did not ask for does not merely look untidy - it arrives on the
  * application's input stream and is read as keystrokes.
  */
-static void kt_handle_kitty(KtFilter *f, KtBuf *reply) {
+/** write() that survives partial writes and signals */
+static int kt_gfx_write(int fd, const void *buf, size_t n) {
+    const char *p = buf;
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = write(fd, p + off, n - off);
+        if (w < 0) {
+            if (errno == EINTR) { continue; }
+            return -1;
+        }
+        off += (size_t) w;
+    }
+    return 0;
+}
+
+/** One line of control followed by optional binary, to kterm's socket */
+static void kt_gfx_send(KtFilter *f, const char *header,
+                        const unsigned char *data, size_t len) {
+    if (f->gfx_fd < 0) { return; }
+    if (kt_gfx_write(f->gfx_fd, header, strlen(header)) != 0) { return; }
+    if (len) { kt_gfx_write(f->gfx_fd, data, len); }
+}
+
+/**
+ * A completed transmission. The pixels go to kterm straight away, but
+ * where to put them is not known yet: kitty places at the cursor, and the
+ * only authority on where VTE's cursor is, is VTE. So ask it with a
+ * cursor position report and finish the placement when the answer comes
+ * back up the input path. Nothing blocks; the image simply appears a
+ * round trip later.
+ */
+static void kt_gfx_complete(KtFilter *f, KtBuf *out) {
+    char hdr[160];
+
+    snprintf(hdr, sizeof(hdr), "IMG %ld %d %d %d %lu\n",
+             f->gfx_id, f->gfx_fmt, f->gfx_w, f->gfx_h,
+             (unsigned long) f->gfx_data.len);
+    kt_gfx_send(f, hdr, f->gfx_data.data, f->gfx_data.len);
+    f->n_gfx_images++;
+    ktbuf_clear(&f->gfx_data);
+
+    if (!f->gfx_place || f->gfx_fd < 0) { return; }
+    if (f->dsr_n >= (int) (sizeof(f->dsr_queue) / sizeof(f->dsr_queue[0]))) {
+        /* more placements in flight than we can track; drop the oldest */
+        memmove(f->dsr_queue, f->dsr_queue + 1, sizeof(f->dsr_queue) - sizeof(f->dsr_queue[0]));
+        memmove(f->dsr_cols, f->dsr_cols + 1, sizeof(f->dsr_cols) - sizeof(f->dsr_cols[0]));
+        memmove(f->dsr_rows, f->dsr_rows + 1, sizeof(f->dsr_rows) - sizeof(f->dsr_rows[0]));
+        f->dsr_n--;
+    }
+    f->dsr_queue[f->dsr_n] = f->gfx_id;
+    f->dsr_cols[f->dsr_n] = f->gfx_cols;
+    f->dsr_rows[f->dsr_n] = f->gfx_rows;
+    f->dsr_n++;
+    f->dsr_pending++;
+    ktbuf_adds(out, "\033[6n");
+}
+
+static void kt_handle_kitty(KtFilter *f, KtBuf *out, KtBuf *reply) {
     const char *body = (const char *) f->pending.data + 1;   /* skip 'G' */
     size_t blen = f->pending.len - 1;
     const char *semi = memchr(body, ';', blen);
     size_t clen = semi ? (size_t) (semi - body) : blen;
+    const char *payload = semi ? semi + 1 : NULL;
+    size_t plen = semi ? blen - clen - 1 : 0;
     char buf[64];
     KtGfx g;
 
     kt_gfx_parse(body, clen, &g);
 
-    if (g.action != 'q') { return; }        /* transmission: Stage 2 */
-    if (g.quiet >= 1) { return; }           /* OK is a success reply; q=1 bans those */
-
-    ktbuf_adds(reply, "\033_G");
-    snprintf(buf, sizeof(buf), "i=%ld", g.has_id ? g.id : 0L);
-    ktbuf_adds(reply, buf);
-    if (g.has_number) {
-        snprintf(buf, sizeof(buf), ",I=%ld", g.number);
+    if (g.action == 'q') {
+        if (g.quiet >= 1) { return; }     /* OK is a success reply; q=1 bans those */
+        ktbuf_adds(reply, "\033_G");
+        snprintf(buf, sizeof(buf), "i=%ld", g.has_id ? g.id : 0L);
         ktbuf_adds(reply, buf);
+        if (g.has_number) {
+            snprintf(buf, sizeof(buf), ",I=%ld", g.number);
+            ktbuf_adds(reply, buf);
+        }
+        ktbuf_adds(reply, ";OK\033\\");
+        f->n_gfx_queries++;
+        return;
     }
-    ktbuf_adds(reply, ";OK\033\\");
-    f->n_gfx_queries++;
+
+    if (g.action == 'd') {
+        char hdr[64];
+        /* d=a or no id means everything; anything else is one image */
+        if (g.has_id) { snprintf(hdr, sizeof(hdr), "DEL %ld\n", g.id); }
+        else { snprintf(hdr, sizeof(hdr), "DELALL\n"); }
+        kt_gfx_send(f, hdr, NULL, 0);
+        return;
+    }
+
+    /* a= defaults to transmit when omitted */
+    if (g.action != 0 && g.action != 'T' && g.action != 't' && g.action != 'p') {
+        return;
+    }
+
+    if (!f->gfx_chunking) {
+        /*
+         * First chunk carries the controls; later ones carry only m=.
+         * Only direct transmission is supported - the file and shared
+         * memory transports name paths in the application's filesystem,
+         * which over ssh is not ours to read.
+         */
+        if (g.transport != 0 && g.transport != 'd') { return; }
+        ktbuf_clear(&f->gfx_data);
+        f->gfx_id = g.has_id ? g.id : 0;
+        f->gfx_fmt = g.fmt ? g.fmt : 32;
+        f->gfx_w = g.width;
+        f->gfx_h = g.height;
+        f->gfx_cols = g.cols;
+        f->gfx_rows = g.rows;
+        f->gfx_place = (g.action == 'T' || g.action == 'p');
+        f->gfx_acc = 0;
+        f->gfx_bits = 0;
+    }
+
+    if (payload && plen) {
+        if (f->gfx_data.len + plen > KT_GFX_MAX) {
+            /* runaway or hostile image; abandon it rather than grow forever */
+            if (f->log) { fprintf(f->log, "-- gfx: image over %d bytes, dropped\n", KT_GFX_MAX); }
+            ktbuf_clear(&f->gfx_data);
+            f->gfx_chunking = 0;
+            return;
+        }
+        kt_b64_decode(&f->gfx_data, payload, plen, &f->gfx_acc, &f->gfx_bits);
+    }
+
+    if (g.more) { f->gfx_chunking = 1; return; }
+
+    f->gfx_chunking = 0;
+    kt_gfx_complete(f, out);
 }
 
-static void kt_handle_string(KtFilter *f, KtBuf *reply) {
+static void kt_handle_string(KtFilter *f, KtBuf *out, KtBuf *reply) {
     if (f->str_kind == '_') {
         if (f->graphics && f->pending.len >= 1 && f->pending.data[0] == 'G') {
-            kt_handle_kitty(f, reply);
+            kt_handle_kitty(f, out, reply);
         }
         return;
     }
@@ -685,6 +876,7 @@ void ktfilter_downstream(KtFilter *f, const unsigned char *in, size_t n,
                         ktbuf_addc(out, 0x1b);
                         break;          /* stay in KT_ESC */
                     default:
+                        if (c == 'c') { kt_gfx_invalidate(f); }   /* RIS */
                         ktbuf_addc(out, 0x1b);
                         ktbuf_addc(out, c);
                         f->state = KT_GROUND;
@@ -716,7 +908,7 @@ void ktfilter_downstream(KtFilter *f, const unsigned char *in, size_t n,
                     f->esc_seen = 0;
                     if (c == '\\') {
                         if (f->state == KT_OSC) { kt_handle_osc(f, 0x1b, out, reply); }
-                        else { kt_handle_string(f, reply); }
+                        else { kt_handle_string(f, out, reply); }
                         f->state = KT_GROUND;
                         break;
                     }
@@ -729,7 +921,7 @@ void ktfilter_downstream(KtFilter *f, const unsigned char *in, size_t n,
                     kt_handle_osc(f, 0x07, out, reply);
                     f->state = KT_GROUND;
                 } else if (c == 0x07 && f->state == KT_STRING) {
-                    kt_handle_string(f, reply);
+                    kt_handle_string(f, out, reply);
                     f->state = KT_GROUND;
                 } else {
                     if (f->pending.len < KT_SEQ_MAX) { ktbuf_addc(&f->pending, c); }
@@ -776,6 +968,50 @@ static void kt_rewrite_mouse(KtFilter *f, const unsigned char *p, KtBuf *out) {
     f->n_mouse_rewritten++;
 }
 
+/*
+ * Try to read a cursor position report at p[0..avail). Returns the number
+ * of bytes consumed, 0 if this is not a CPR, or -1 if it might still
+ * become one once more bytes arrive.
+ */
+static int kt_try_cpr(const unsigned char *p, size_t avail, int *row, int *col) {
+    size_t j = 2;
+    int r = 0, c = 0, seen_semi = 0;
+
+    if (avail < 2) { return -1; }
+    if (p[1] != '[') { return 0; }
+
+    while (j < avail && j < 24) {
+        unsigned char ch = p[j];
+        if (ch >= '0' && ch <= '9') {
+            if (seen_semi) { c = c * 10 + (ch - '0'); }
+            else { r = r * 10 + (ch - '0'); }
+            j++;
+            continue;
+        }
+        if (ch == ';' && !seen_semi) { seen_semi = 1; j++; continue; }
+        if (ch == 'R' && seen_semi) {
+            *row = r;
+            *col = c;
+            return (int) (j + 1);
+        }
+        return 0;                    /* some other CSI, leave it alone */
+    }
+    return (j >= 24) ? 0 : -1;
+}
+
+/** Hand kterm a position for the oldest placement still waiting on one */
+static void kt_gfx_place(KtFilter *f, int row, int col) {
+    char hdr[96];
+    if (f->dsr_n <= 0) { return; }
+    snprintf(hdr, sizeof(hdr), "PLACE %ld %d %d %d %d\n",
+             f->dsr_queue[0], f->dsr_cols[0], f->dsr_rows[0], row, col);
+    kt_gfx_send(f, hdr, NULL, 0);
+    memmove(f->dsr_queue, f->dsr_queue + 1, sizeof(f->dsr_queue) - sizeof(f->dsr_queue[0]));
+    memmove(f->dsr_cols, f->dsr_cols + 1, sizeof(f->dsr_cols) - sizeof(f->dsr_cols[0]));
+    memmove(f->dsr_rows, f->dsr_rows + 1, sizeof(f->dsr_rows) - sizeof(f->dsr_rows[0]));
+    f->dsr_n--;
+}
+
 void ktfilter_upstream(KtFilter *f, const unsigned char *in, size_t n, KtBuf *out) {
     const unsigned char *p;
     size_t i = 0, len;
@@ -784,7 +1020,7 @@ void ktfilter_upstream(KtFilter *f, const unsigned char *in, size_t n, KtBuf *ou
 
     /* When the application is happy with what VTE sends, stay out of the
      * way entirely - no buffering, no added latency on keystrokes. */
-    if (!f->mouse_sgr && !f->mouse_urxvt && f->in_pending.len == 0) {
+    if (!f->mouse_sgr && !f->mouse_urxvt && !f->dsr_pending && f->in_pending.len == 0) {
         ktbuf_add(out, in, n);
         return;
     }
@@ -799,6 +1035,26 @@ void ktfilter_upstream(KtFilter *f, const unsigned char *in, size_t n, KtBuf *ou
             ktbuf_addc(out, p[i]);
             i++;
             continue;
+        }
+        /*
+         * A cursor report we asked for on the application's behalf, to
+         * find out where an image should go. Swallow it: the application
+         * never sent the query and would read the answer as keystrokes.
+         * If the application has its own DSR outstanding the replies are
+         * indistinguishable, so we take them in order and accept that a
+         * program querying the cursor while placing images may see one
+         * answer go missing.
+         */
+        if (f->dsr_pending > 0) {
+            int row = 0, col = 0;
+            int used = kt_try_cpr(p + i, avail, &row, &col);
+            if (used > 0) {
+                kt_gfx_place(f, row, col);
+                f->dsr_pending--;
+                i += (size_t) used;
+                continue;
+            }
+            if (used < 0) { break; }     /* might still complete */
         }
         if (!f->mouse_sgr && !f->mouse_urxvt) {
             ktbuf_addc(out, p[i]);

@@ -13,6 +13,9 @@
  * only queues regions and paints later - so anything drawn from an
  * expose-event handler would be painted over moments afterwards.
  *
+ * ktsh does the protocol work and sends us decoded images over a unix
+ * socket; see ktfilter.c. We only decode, scale, dither and place.
+ *
  * This is free software; you can redistribute it and/or modify it under
  * the terms of the GNU Library General Public License as published by
  * the Free Software Foundation; either version 3 of the License, or
@@ -25,10 +28,29 @@
 #include <gtk/gtk.h>
 
 /**
- * Draw a test pattern over the terminal to prove the overlay survives
- * VTE's own painting. Enabled with KTERM_GFX_SPIKE=1.
+ * Open the socket ktsh will send images on and start listening.
+ * Must be called before the child is spawned, because the path has to go
+ * into its environment.
+ * @param path_out Receives the socket path
+ * @param path_len Size of path_out
+ * @return TRUE if the socket is listening
+ */
+gboolean graphics_init(gchar *path_out, gsize path_len);
+
+/**
+ * Bind the image layer to a realized terminal widget. Until this is
+ * called images are stored but not drawn.
  * @param terminal Realized terminal widget
  */
-void graphics_spike(GtkWidget *terminal);
+void graphics_attach(GtkWidget *terminal);
+
+/** Drop every image, e.g. on reset. */
+void graphics_clear(void);
+
+/** Re-scale and re-place everything, after a font size or rotation change. */
+void graphics_refresh(void);
+
+/** Close the socket and remove it from the filesystem. */
+void graphics_shutdown(void);
 
 #endif /* graphics_h */

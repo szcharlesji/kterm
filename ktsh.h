@@ -59,6 +59,23 @@ typedef struct {
     /* --- upstream (terminal -> application) parser --- */
     KtBuf in_pending;       /**< partial ESC [ M report held back */
 
+    /* --- kitty graphics --- */
+    int gfx_fd;             /**< socket kterm listens on, or -1 */
+    KtBuf gfx_data;         /**< decoded payload of the transmission in flight */
+    long gfx_id;            /**< id of the transmission in flight */
+    int gfx_fmt;            /**< f= of the transmission in flight */
+    int gfx_w, gfx_h;       /**< s= and v=, needed for the raw formats */
+    int gfx_cols, gfx_rows; /**< c= and r=, the cell box the app asked for */
+    int gfx_place;          /**< the opening chunk asked for display too */
+    int gfx_chunking;       /**< a multi chunk transmission is open */
+    unsigned long gfx_acc;  /**< base64 bits carried across a chunk boundary */
+    int gfx_bits;
+    int dsr_pending;        /**< cursor reports we asked for and must swallow */
+    long dsr_queue[8];      /**< ids awaiting a position, oldest first */
+    int dsr_cols[8];
+    int dsr_rows[8];
+    int dsr_n;
+
     /* --- negotiated modes, learned from what the application asked for --- */
     int mouse_sgr;          /**< app requested DECSET 1006 */
     int mouse_urxvt;        /**< app requested DECSET 1015 */
@@ -82,6 +99,7 @@ typedef struct {
     unsigned long n_truecolor;
     unsigned long n_clipboard;
     unsigned long n_gfx_queries;   /**< kitty a=q handshakes answered */
+    unsigned long n_gfx_images;    /**< images handed to kterm */
 } KtFilter;
 
 void ktfilter_init(KtFilter *f);
@@ -121,5 +139,8 @@ int ktfilter_upstream_pending(const KtFilter *f);
 
 /** Nearest xterm-256 palette index for an 8-bit-per-channel colour */
 int ktfilter_rgb_to_256(int r, int g, int b);
+
+/** Largest image we will reassemble, in bytes, before giving up on it */
+#define KT_GFX_MAX (4 * 1024 * 1024)
 
 #endif /* KTSH_H */

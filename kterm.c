@@ -76,6 +76,7 @@ static void install_signal_handlers(void) {
  */
 static void clean_on_exit(Keyboard *keyboard) {
     D printf("cleanup\n");
+    graphics_shutdown();
 #ifdef KINDLE
     keyboard_grab(NULL, FALSE);
     orientation_restore();
@@ -170,6 +171,8 @@ static void resize_font(VteTerminal *terminal, const guint mod) {
     D printf("font_size: %i\n", font_size);
     conf->font_size = (guint) font_size;
     set_terminal_font(terminal, conf->font_family, font_size);
+    /* cell geometry changed, so every image is now the wrong size */
+    graphics_refresh();
 }
 
 /**
@@ -366,6 +369,7 @@ static void screen_rotate(GtkWidget *widget, gpointer box) {
  */
 static void reset_terminal(GtkWidget *widget, gpointer terminal) {
     UNUSED(widget);
+    graphics_clear();
     vte_terminal_reset(terminal, TRUE, TRUE);
 }
 
@@ -1096,6 +1100,21 @@ gint main(gint argc, gchar **argv) {
         envv[envc++] = conf->color_reversed ? (gchar *) "KTERM_SCHEME=dark"
                                             : (gchar *) "KTERM_SCHEME=light";
     }
+
+    /*
+     * Images arrive out of band: ktsh strips the graphics sequences from
+     * the stream and hands us the decoded pictures over this socket, since
+     * VTE has no way to draw them and no way to tell us they were there.
+     */
+    if (conf->graphics_on && conf->shim_on && envc < TERM_ARGS_MAX - 1) {
+        static gchar gfx_env[160];
+        gchar gfx_sock[128];
+        if (graphics_init(gfx_sock, sizeof(gfx_sock))) {
+            snprintf(gfx_env, sizeof(gfx_env), "KTERM_GFX_SOCK=%s", gfx_sock);
+            envv[envc++] = gfx_env;
+            D printf("gfx: listening on %s\n", gfx_sock);
+        }
+    }
     D printf("env: color_reversed=%i shim=%i mouse=%i\n",
              conf->color_reversed, conf->shim_on, conf->mouse_on);
     write_scheme_file(conf->color_reversed);
@@ -1196,7 +1215,7 @@ gint main(gint argc, gchar **argv) {
     UNUSED(statusbar);
     g_signal_connect(keyboard_box, "size-allocate", G_CALLBACK(keyboard_update), keyboard);
     gtk_window_maximize(GTK_WINDOW(window));
-    if (getenv("KTERM_GFX_SPIKE")) { graphics_spike(terminal); }
+    if (conf->graphics_on && conf->shim_on) { graphics_attach(terminal); }
     gtk_main();
     
     clean_on_exit(keyboard);

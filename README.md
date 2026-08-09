@@ -51,6 +51,12 @@ clipboard.
 palette, and the 16 greys are tuned for contrast on paper rather than
 synthesised from eight.
 
+**Images.** The kitty graphics protocol works, over ssh, in a terminal
+emulator that predates it by a decade — `snacks.image` in nvim, image
+previews, plots. VTE cannot draw them, so each picture is dithered to the
+panel's 16 greys and hung on its own window above the text, anchored to
+its line so it scrolls with the output.
+
 Also: builds for hard-float firmware (5.16.3+), settings persist, screen
 rotation still works.
 
@@ -131,9 +137,17 @@ make dist-kindle
 
 ## Limits
 
-VTE 0.28 cannot do true 24-bit colour, ligatures, Sixel or Kitty graphics, and
-no amount of filtering changes that. Keyboard layouts follow the
-[original format](layouts/keyboard.xml).
+VTE 0.28 cannot do true 24-bit colour, ligatures or Sixel, and no amount of
+filtering changes that.
+
+Images have edges. Only direct transmission is supported — the file and
+shared-memory transports name paths on the application's machine, which over
+ssh is not ours to read. An image is dropped when the screen is cleared, on a
+switch to the alternate screen, and on reset; a program that paints over an
+image without clearing first will leave it stranded, because VTE never reports
+which cells were overwritten.
+
+Keyboard layouts follow the [original format](layouts/keyboard.xml).
 
 ## Licence
 

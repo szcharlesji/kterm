@@ -140,6 +140,7 @@ typedef struct {
     gchar orientation;  /** Screen orientation: 'U', 'R' or 'L' */
     gchar orientation_saved;  /** Initial screen orientation: 'U', 'R' or 'L' */
     gboolean shim_on;  /** Route the child process through the ktsh shim */
+    gboolean graphics_on;  /** Advertise and render the kitty graphics protocol */
     gboolean mouse_on;  /** Report taps to the application as mouse events */
     gboolean touch_scroll;  /** One finger drag scrolls the scrollback buffer */
     gboolean statusbar_on;  /** Show the clock/battery/menu strip above the terminal */

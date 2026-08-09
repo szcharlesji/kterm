@@ -114,6 +114,7 @@ static void usage(void) {
     printf("        -c <mode>        truecolor folding: 256 (default), gray, keep\n");
     printf("        -C <path>        file to receive OSC 52 clipboard writes\n");
     printf("        -d <path>        log both byte streams to path\n");
+    printf("        -G <0|1>         kitty graphics support (default 1)\n");
     printf("        -s <path>        file kterm records the live scheme in\n");
     printf("        -h               show this message\n");
     printf("        -v               print version and exit\n");
@@ -146,6 +147,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "-d") == 0) { logpath = argv[++i]; continue; }
         if (strcmp(argv[i], "-C") == 0) { clip = argv[++i]; continue; }
         if (strcmp(argv[i], "-s") == 0) { schemefile = argv[++i]; continue; }
+        if (strcmp(argv[i], "-G") == 0) { filter.graphics = atoi(argv[++i]) != 0; continue; }
         if (strcmp(argv[i], "-c") == 0) {
             const char *m = argv[++i];
             if (strcmp(m, "gray") == 0) { filter.color_mode = KT_COLOR_GRAY; }

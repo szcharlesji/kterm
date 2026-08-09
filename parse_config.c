@@ -95,6 +95,7 @@ KTconf *parse_config(void) {
     snprintf(conf->kb_conf_path, sizeof(conf->kb_conf_path), "%s", KB_FULL_PATH);
     conf->orientation = 0;
     conf->shim_on = TRUE;
+    conf->graphics_on = TRUE;
     conf->mouse_on = TRUE;
     conf->touch_scroll = TRUE;
     conf->statusbar_on = TRUE;
@@ -176,6 +177,14 @@ KTconf *parse_config(void) {
             if (shim_on == 0 || shim_on == 1) {
                 conf->shim_on = shim_on;
                 D printf("shim = %i\n", conf->shim_on);
+            }
+        }
+        else if (key_is(buf, "graphics")) {
+            gint graphics_on = -1;
+            sscanf(buf, "graphics = %i", &graphics_on);
+            if (graphics_on == 0 || graphics_on == 1) {
+                conf->graphics_on = graphics_on;
+                D printf("graphics = %i\n", conf->graphics_on);
             }
         }
         else if (key_is(buf, "mouse_report")) {

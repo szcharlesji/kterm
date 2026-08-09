@@ -899,6 +899,8 @@ static void setup_terminal(GtkWidget *terminal, gchar *command, gchar **envv, GE
         argv[argc++] = conf->shim_color;
         argv[argc++] = (gchar *) "-b";
         argv[argc++] = (gchar *) (conf->color_reversed ? "dark" : "light");
+        argv[argc++] = (gchar *) "-G";
+        argv[argc++] = (gchar *) (conf->graphics_on ? "1" : "0");
         if (sibling_path(SCHEME_FILE, scheme_path, sizeof(scheme_path))) {
             argv[argc++] = (gchar *) "-s";
             argv[argc++] = scheme_path;

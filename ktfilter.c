@@ -185,6 +185,7 @@ void ktfilter_init(KtFilter *f) {
     ktbuf_init(&f->pending);
     ktbuf_init(&f->in_pending);
     f->state = KT_GROUND;
+    f->graphics = 1;
     f->color_mode = KT_COLOR_256;
     f->last_button = 0;
     strcpy(f->fg_spec, "rgb:0000/0000/0000");
@@ -354,7 +355,7 @@ static void kt_handle_sgr(KtFilter *f, char *params, KtBuf *out) {
     ktbuf_addc(out, 'm');
 }
 
-static void kt_handle_csi(KtFilter *f, KtBuf *out) {
+static void kt_handle_csi(KtFilter *f, KtBuf *out, KtBuf *reply) {
     unsigned char *seq = f->pending.data;
     size_t len = f->pending.len;
     unsigned char final, priv = 0, inter = 0;
@@ -377,7 +378,17 @@ static void kt_handle_csi(KtFilter *f, KtBuf *out) {
     /* sequences VTE 0.28 would print rather than execute */
     if (final == 'u' && priv != 0) { return; }                                    /* kitty keyboard */
     if (final == 'q' && inter == ' ') { return; }                                 /* DECSCUSR       */
-    if (final == 'q' && priv == '>') { return; }                                  /* XTVERSION      */
+    if (final == 'q' && priv == '>') {
+        /*
+         * XTVERSION. VTE 0.28 has no answer for this, so we supply one.
+         * The name is how applications decide which capabilities to use:
+         * claiming wezterm gets us the kitty graphics protocol with direct
+         * placement, and avoids the unicode placeholder scheme that kitty
+         * and ghostty imply, which we cannot render.
+         */
+        if (f->graphics) { ktbuf_adds(reply, "\033P>|wezterm 20240203-110809\033\\"); }
+        return;
+    }
     if (final == 'p' && inter == '$') { return; }                                 /* DECRQM/DECRQSS */
     if (final == 'c' && priv == '=') { return; }                                  /* DA3            */
     if (final == 'S' && priv == '?') { return; }                                  /* XTSMGRAPHICS   */
@@ -529,7 +540,105 @@ static void kt_handle_osc(KtFilter *f, unsigned char term, KtBuf *out, KtBuf *re
 /* DCS / APC / PM / SOS                                               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* kitty graphics protocol                                            */
+/* ------------------------------------------------------------------ */
+
+/** Controls from an APC _G block. Every kitty control key is one byte. */
+typedef struct {
+    int action;      /**< a= : 'q' query, 'T'/'t' transmit, 'd' delete, 'p' place */
+    int quiet;       /**< q= : 1 suppress success, 2 suppress everything */
+    long id;         /**< i= */
+    long number;     /**< I= */
+    int has_id;
+    int has_number;
+} KtGfx;
+
+static long kt_gfx_num(const char *v, size_t n) {
+    char tmp[32];
+    if (n >= sizeof(tmp)) { n = sizeof(tmp) - 1; }
+    memcpy(tmp, v, n);
+    tmp[n] = '\0';
+    return strtol(tmp, NULL, 10);
+}
+
+/**
+ * Parse the comma separated k=v control block that precedes the ';'.
+ * Unknown keys are skipped rather than treated as an error - the protocol
+ * grows new ones and an application is entitled to send them.
+ */
+static void kt_gfx_parse(const char *s, size_t n, KtGfx *g) {
+    size_t i = 0;
+
+    memset(g, 0, sizeof(*g));
+
+    while (i < n) {
+        char key = s[i++];
+        const char *val;
+        size_t vlen = 0;
+
+        if (i >= n || s[i] != '=') {                 /* malformed, resync */
+            while (i < n && s[i] != ',') { i++; }
+            if (i < n) { i++; }
+            continue;
+        }
+        i++;                                          /* '=' */
+        val = s + i;
+        while (i < n && s[i] != ',') { i++; vlen++; }
+        if (i < n) { i++; }                           /* ',' */
+
+        switch (key) {
+            case 'a': if (vlen) { g->action = (unsigned char) val[0]; } break;
+            case 'q': g->quiet = (int) kt_gfx_num(val, vlen); break;
+            case 'i': g->id = kt_gfx_num(val, vlen); g->has_id = 1; break;
+            case 'I': g->number = kt_gfx_num(val, vlen); g->has_number = 1; break;
+            default: break;
+        }
+    }
+}
+
+/*
+ * An application discovers graphics support by transmitting a one pixel
+ * image with a=q and waiting for
+ *
+ *     ESC _ G i=<id> ; OK ESC \
+ *
+ * The q= control says how chatty we may be: 1 suppresses success replies,
+ * 2 suppresses all of them. Honour it strictly. A reply the application
+ * did not ask for does not merely look untidy - it arrives on the
+ * application's input stream and is read as keystrokes.
+ */
+static void kt_handle_kitty(KtFilter *f, KtBuf *reply) {
+    const char *body = (const char *) f->pending.data + 1;   /* skip 'G' */
+    size_t blen = f->pending.len - 1;
+    const char *semi = memchr(body, ';', blen);
+    size_t clen = semi ? (size_t) (semi - body) : blen;
+    char buf[64];
+    KtGfx g;
+
+    kt_gfx_parse(body, clen, &g);
+
+    if (g.action != 'q') { return; }        /* transmission: Stage 2 */
+    if (g.quiet >= 1) { return; }           /* OK is a success reply; q=1 bans those */
+
+    ktbuf_adds(reply, "\033_G");
+    snprintf(buf, sizeof(buf), "i=%ld", g.has_id ? g.id : 0L);
+    ktbuf_adds(reply, buf);
+    if (g.has_number) {
+        snprintf(buf, sizeof(buf), ",I=%ld", g.number);
+        ktbuf_adds(reply, buf);
+    }
+    ktbuf_adds(reply, ";OK\033\\");
+    f->n_gfx_queries++;
+}
+
 static void kt_handle_string(KtFilter *f, KtBuf *reply) {
+    if (f->str_kind == '_') {
+        if (f->graphics && f->pending.len >= 1 && f->pending.data[0] == 'G') {
+            kt_handle_kitty(f, reply);
+        }
+        return;
+    }
     if (f->str_kind != 'P' || f->pending.len < 2) { return; }
     /* Politely refuse the two DCS queries applications actually block on. */
     if (f->pending.data[0] == '+' && f->pending.data[1] == 'q') {
@@ -591,7 +700,7 @@ void ktfilter_downstream(KtFilter *f, const unsigned char *in, size_t n,
                 }
                 ktbuf_addc(&f->pending, c);
                 if (c >= 0x40 && c <= 0x7e) {
-                    kt_handle_csi(f, out);
+                    kt_handle_csi(f, out, reply);
                     f->state = KT_GROUND;
                 } else if (f->pending.len > KT_CSI_MAX) {
                     /* not a real sequence; give it back verbatim */

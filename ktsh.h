@@ -67,6 +67,7 @@ typedef struct {
     int last_button;        /**< legacy release reports omit the button */
 
     /* --- configuration --- */
+    int graphics;           /**< answer the kitty graphics handshake */
     KtColorMode color_mode;
     char fg_spec[32];       /**< e.g. "rgb:0000/0000/0000" */
     char bg_spec[32];       /**< e.g. "rgb:ffff/ffff/ffff" */
@@ -80,6 +81,7 @@ typedef struct {
     unsigned long n_mouse_rewritten;
     unsigned long n_truecolor;
     unsigned long n_clipboard;
+    unsigned long n_gfx_queries;   /**< kitty a=q handshakes answered */
 } KtFilter;
 
 void ktfilter_init(KtFilter *f);

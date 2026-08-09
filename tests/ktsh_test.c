@@ -247,6 +247,66 @@ static void test_dcs(void) {
     ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
 }
 
+/*
+ * The handshake an application uses to decide whether images are worth
+ * attempting. snacks.nvim sends CSI > q and gives up after a second if
+ * nothing comes back, which is why it reported no graphics support.
+ */
+static void test_kitty_graphics(void) {
+    KtFilter f;
+    KtBuf out, reply;
+    printf("kitty graphics handshake\n");
+    ktfilter_init(&f);
+    ktbuf_init(&out); ktbuf_init(&reply);
+
+    down(&f, "\033[>q", &out, &reply);
+    expect("XTVERSION prints nothing", &out, "");
+    expect("XTVERSION answered as wezterm", &reply,
+           "\033P>|wezterm 20240203-110809\033\\");
+
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\after", &out, &reply);
+    expect("query APC removed from screen", &out, "after");
+    expect("query answered OK", &reply, "\033_Gi=31;OK\033\\");
+
+    /* q=2 means silence. A reply here would be read as keystrokes. */
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Gi=31,a=q,q=2;AAAA\033\\", &out, &reply);
+    expect("q=2 suppresses the reply", &reply, "");
+
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Gi=31,a=q,q=1;AAAA\033\\", &out, &reply);
+    expect("q=1 suppresses the success reply", &reply, "");
+
+    /* image number is echoed back when the application used one */
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Ga=q,i=7,I=42;AAAA\033\\", &out, &reply);
+    expect("image number echoed", &reply, "\033_Gi=7,I=42;OK\033\\");
+
+    /* no i= at all still needs a well formed answer */
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Ga=q;AAAA\033\\", &out, &reply);
+    expect("missing id answered as i=0", &reply, "\033_Gi=0;OK\033\\");
+
+    /* unknown controls must not derail the parse */
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033_Ga=q,i=9,zz=1,X=,f=100;AAAA\033\\", &out, &reply);
+    expect("unknown controls skipped", &reply, "\033_Gi=9;OK\033\\");
+
+    expect_int("query count", (long) f.n_gfx_queries, 4);
+    ktfilter_free(&f);
+
+    /* with graphics off we behave exactly as 2.7.0 did */
+    ktfilter_init(&f);
+    f.graphics = 0;
+    ktbuf_clear(&out); ktbuf_clear(&reply);
+    down(&f, "\033[>q\033_Ga=q,i=1;AAAA\033\\text", &out, &reply);
+    expect("graphics=0 prints nothing", &out, "text");
+    expect("graphics=0 answers nothing", &reply, "");
+
+    ktbuf_free(&out); ktbuf_free(&reply); ktfilter_free(&f);
+}
+
 static void test_mouse_translation(void) {
     KtFilter f;
     KtBuf out;
@@ -391,6 +451,7 @@ int main(void) {
     test_decset();
     test_modern_csi();
     test_dcs();
+    test_kitty_graphics();
     test_mouse_translation();
     test_escape_key_not_swallowed();
     test_split_writes();
